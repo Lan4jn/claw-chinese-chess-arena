@@ -1,0 +1,22 @@
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+bin/
+dist/
+
+# Coverage files
+coverage.*
+*.coverprofile
+
+# IDE and editor files
+.vscode/
+.idea/
+
+# OS noise
+.DS_Store
+Thumbs.db
