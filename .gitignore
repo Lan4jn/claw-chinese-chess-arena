@@ -6,6 +6,7 @@
 *.dylib
 *.test
 *.out
+pico-xiangqi-arena
 bin/
 dist/
 
