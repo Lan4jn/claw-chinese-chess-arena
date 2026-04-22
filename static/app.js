@@ -27,6 +27,8 @@ const state = {
   lastError: "",
   refreshInFlight: false,
   joinInFlight: false,
+  hostSettingsDirty: false,
+  hostSeatDirty: {},
 };
 
 const dom = {
@@ -112,6 +114,18 @@ function setJoinBusy(isBusy) {
   }
   dom.joinRoomButton.disabled = isBusy;
   dom.joinRoomButton.textContent = isBusy ? "进入中..." : "进入比赛";
+}
+
+function resetHostDirtyState() {
+  state.hostSettingsDirty = false;
+  state.hostSeatDirty = {};
+}
+
+function markHostSeatDirty(seat, isDirty) {
+  if (!seat) {
+    return;
+  }
+  state.hostSeatDirty[seat] = Boolean(isDirty);
 }
 
 function escapeHTML(value) {
@@ -560,6 +574,7 @@ function renderHostControls() {
   }
   if (!state.isHost) {
     setHostDrawerOpen(false);
+    resetHostDirtyState();
   }
 
   if (!isHostReady) {
@@ -568,15 +583,18 @@ function renderHostControls() {
 
   const room = state.hostRoom.room;
 
-  if (dom.stepIntervalInput) {
+  if (dom.stepIntervalInput && !state.hostSettingsDirty) {
     dom.stepIntervalInput.value = room.step_interval_ms > 0 ? String(room.step_interval_ms) : "";
   }
-  if (dom.defaultViewSelect) {
+  if (dom.defaultViewSelect && !state.hostSettingsDirty) {
     dom.defaultViewSelect.value = room.default_view === "commentary" ? "commentary" : "board";
   }
 
   dom.seatForms.forEach((form) => {
     const seat = form.dataset.seat;
+    if (state.hostSeatDirty[seat]) {
+      return;
+    }
     populateSeatForm(form, extractSeatBinding(state.hostRoom, seat));
   });
 }
@@ -600,13 +618,39 @@ async function handleSaveSettings() {
   if (!state.isHost || !state.roomCode || !state.clientToken) {
     return;
   }
+  const room = state.hostRoom && state.hostRoom.room ? state.hostRoom.room : null;
   const interval = dom.stepIntervalInput ? Number(dom.stepIntervalInput.value) : 0;
   const defaultView = dom.defaultViewSelect ? dom.defaultViewSelect.value : "board";
-  await saveRoomSettings({
-    step_interval_ms: Number.isFinite(interval) && interval > 0 ? Math.floor(interval) : 0,
-    default_view: defaultView === "commentary" ? "commentary" : "board",
-  });
+  const normalizedDefaultView = defaultView === "commentary" ? "commentary" : "board";
+  const hasPositiveInterval = Number.isFinite(interval) && interval > 0;
+  const nextInterval = hasPositiveInterval ? Math.floor(interval) : 0;
+  const intervalChanged = hasPositiveInterval && room && room.step_interval_ms !== nextInterval;
+  const defaultViewChanged = room && room.default_view !== normalizedDefaultView;
+
+  if (!hasPositiveInterval && !defaultViewChanged) {
+    setJoinNote("未保存：步间隔需大于 0。", true);
+    return;
+  }
+  if (!intervalChanged && !defaultViewChanged) {
+    setJoinNote("设置未变化。");
+    state.hostSettingsDirty = false;
+    return;
+  }
+
+  const payload = {
+    default_view: normalizedDefaultView,
+  };
+  if (hasPositiveInterval) {
+    payload.step_interval_ms = nextInterval;
+  }
+
+  await saveRoomSettings(payload);
+  state.hostSettingsDirty = false;
   await refreshAll();
+  if (!hasPositiveInterval && defaultViewChanged) {
+    setJoinNote("默认视图已保存；步间隔需大于 0 才会更新。");
+    return;
+  }
   setJoinNote("房间设置已保存。");
 }
 
@@ -641,6 +685,7 @@ async function handleSaveSeat(form) {
     seat,
     binding,
   });
+  markHostSeatDirty(seat, false);
   await refreshAll();
   setJoinNote("席位配置已保存。");
 }
@@ -654,6 +699,7 @@ async function handleRemoveSeat(form) {
     return;
   }
   await removeSeat(seat);
+  markHostSeatDirty(seat, false);
   await refreshAll();
   setJoinNote("席位已清空。");
 }
@@ -928,6 +974,29 @@ function bindEvents() {
       });
     });
   }
+  if (dom.stepIntervalInput) {
+    dom.stepIntervalInput.addEventListener("input", () => {
+      state.hostSettingsDirty = true;
+    });
+  }
+  if (dom.defaultViewSelect) {
+    dom.defaultViewSelect.addEventListener("change", () => {
+      state.hostSettingsDirty = true;
+    });
+  }
+
+  dom.seatForms.forEach((form) => {
+    const seat = form.dataset.seat;
+    if (!seat) {
+      return;
+    }
+    form.addEventListener("input", () => {
+      markHostSeatDirty(seat, true);
+    });
+    form.addEventListener("change", () => {
+      markHostSeatDirty(seat, true);
+    });
+  });
 
   dom.saveSeatButtons.forEach((button) => {
     button.addEventListener("click", () => {

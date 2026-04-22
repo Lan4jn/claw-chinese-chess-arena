@@ -464,6 +464,119 @@ func TestArenaHTTPHostRevealFlow(t *testing.T) {
 	}
 }
 
+func TestArenaHTTPHostSettingsRejectsNonHostMutation(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	enterHostReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"host-settings-auth-room","client_token":"host-token","join_intent":"player"}`)))
+	enterHostReq.Header.Set("Content-Type", "application/json")
+	enterHostRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterHostRR, enterHostReq)
+	if enterHostRR.Code != http.StatusOK {
+		t.Fatalf("host enter expected 200, got %d body=%s", enterHostRR.Code, enterHostRR.Body.String())
+	}
+
+	publicBeforeReq := httptest.NewRequest(http.MethodGet, "/api/arena/host-settings-auth-room", nil)
+	publicBeforeRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(publicBeforeRR, publicBeforeReq)
+	if publicBeforeRR.Code != http.StatusOK {
+		t.Fatalf("GET public room before mutation expected 200, got %d body=%s", publicBeforeRR.Code, publicBeforeRR.Body.String())
+	}
+	var before struct {
+		StepIntervalMS int    `json:"step_interval_ms"`
+		DefaultView    string `json:"default_view"`
+	}
+	if err := json.NewDecoder(publicBeforeRR.Body).Decode(&before); err != nil {
+		t.Fatalf("Decode() public before response error = %v", err)
+	}
+
+	settingsReq := httptest.NewRequest(http.MethodPost, "/api/arena/host-settings-auth-room/settings", bytes.NewReader([]byte(`{"host_token":"wrong-token","step_interval_ms":1200,"default_view":"commentary"}`)))
+	settingsReq.Header.Set("Content-Type", "application/json")
+	settingsRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(settingsRR, settingsReq)
+	if settingsRR.Code != http.StatusBadRequest {
+		t.Fatalf("POST /api/arena/{code}/settings with wrong token expected 400, got %d body=%s", settingsRR.Code, settingsRR.Body.String())
+	}
+
+	publicAfterReq := httptest.NewRequest(http.MethodGet, "/api/arena/host-settings-auth-room", nil)
+	publicAfterRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(publicAfterRR, publicAfterReq)
+	if publicAfterRR.Code != http.StatusOK {
+		t.Fatalf("GET public room after mutation expected 200, got %d body=%s", publicAfterRR.Code, publicAfterRR.Body.String())
+	}
+	var after struct {
+		StepIntervalMS int    `json:"step_interval_ms"`
+		DefaultView    string `json:"default_view"`
+	}
+	if err := json.NewDecoder(publicAfterRR.Body).Decode(&after); err != nil {
+		t.Fatalf("Decode() public after response error = %v", err)
+	}
+
+	if after.StepIntervalMS != before.StepIntervalMS {
+		t.Fatalf("expected step_interval_ms unchanged on failed settings mutation, before=%d after=%d", before.StepIntervalMS, after.StepIntervalMS)
+	}
+	if after.DefaultView != before.DefaultView {
+		t.Fatalf("expected default_view unchanged on failed settings mutation, before=%q after=%q", before.DefaultView, after.DefaultView)
+	}
+}
+
+func TestArenaHTTPHostRevealRejectsNonHostMutation(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	enterHostReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"host-reveal-auth-room","client_token":"host-token","join_intent":"player"}`)))
+	enterHostReq.Header.Set("Content-Type", "application/json")
+	enterHostRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterHostRR, enterHostReq)
+	if enterHostRR.Code != http.StatusOK {
+		t.Fatalf("host enter expected 200, got %d body=%s", enterHostRR.Code, enterHostRR.Body.String())
+	}
+
+	enterGuestReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"host-reveal-auth-room","client_token":"guest-token","join_intent":"player"}`)))
+	enterGuestReq.Header.Set("Content-Type", "application/json")
+	enterGuestRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterGuestRR, enterGuestReq)
+	if enterGuestRR.Code != http.StatusOK {
+		t.Fatalf("guest enter expected 200, got %d body=%s", enterGuestRR.Code, enterGuestRR.Body.String())
+	}
+
+	publicBeforeReq := httptest.NewRequest(http.MethodGet, "/api/arena/host-reveal-auth-room", nil)
+	publicBeforeRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(publicBeforeRR, publicBeforeReq)
+	if publicBeforeRR.Code != http.StatusOK {
+		t.Fatalf("GET public room before reveal mutation expected 200, got %d body=%s", publicBeforeRR.Code, publicBeforeRR.Body.String())
+	}
+	var before struct {
+		RevealState string `json:"reveal_state"`
+	}
+	if err := json.NewDecoder(publicBeforeRR.Body).Decode(&before); err != nil {
+		t.Fatalf("Decode() public before response error = %v", err)
+	}
+
+	revealReq := httptest.NewRequest(http.MethodPost, "/api/arena/host-reveal-auth-room/reveal", bytes.NewReader([]byte(`{"host_token":"wrong-token","scope":"all"}`)))
+	revealReq.Header.Set("Content-Type", "application/json")
+	revealRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(revealRR, revealReq)
+	if revealRR.Code != http.StatusBadRequest {
+		t.Fatalf("POST /api/arena/{code}/reveal with wrong token expected 400, got %d body=%s", revealRR.Code, revealRR.Body.String())
+	}
+
+	publicAfterReq := httptest.NewRequest(http.MethodGet, "/api/arena/host-reveal-auth-room", nil)
+	publicAfterRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(publicAfterRR, publicAfterReq)
+	if publicAfterRR.Code != http.StatusOK {
+		t.Fatalf("GET public room after reveal mutation expected 200, got %d body=%s", publicAfterRR.Code, publicAfterRR.Body.String())
+	}
+	var after struct {
+		RevealState string `json:"reveal_state"`
+	}
+	if err := json.NewDecoder(publicAfterRR.Body).Decode(&after); err != nil {
+		t.Fatalf("Decode() public after response error = %v", err)
+	}
+
+	if after.RevealState != before.RevealState {
+		t.Fatalf("expected reveal_state unchanged on failed reveal mutation, before=%q after=%q", before.RevealState, after.RevealState)
+	}
+}
+
 func TestStaticAssetsAreServed(t *testing.T) {
 	app := NewApp(NewMemorySnapshotStore())
 
