@@ -18,6 +18,14 @@ const (
 	JoinIntentSpectator JoinIntent = "spectator"
 )
 
+type RoomAction string
+
+const (
+	RoomActionAuto   RoomAction = "auto"
+	RoomActionCreate RoomAction = "create"
+	RoomActionJoin   RoomAction = "join"
+)
+
 type SeatType string
 
 const (
@@ -88,6 +96,7 @@ type EnterRequest struct {
 	ClientToken string     `json:"client_token"`
 	DisplayName string     `json:"display_name,omitempty"`
 	JoinIntent  JoinIntent `json:"join_intent"`
+	RoomAction  RoomAction `json:"room_action,omitempty"`
 }
 
 type ArenaEnterView struct {
@@ -253,9 +262,15 @@ func (a *Arena) Enter(req EnterRequest) (ArenaEnterView, error) {
 	if req.JoinIntent == "" {
 		req.JoinIntent = JoinIntentAuto
 	}
+	if req.RoomAction == "" {
+		req.RoomAction = RoomActionAuto
+	}
 
 	room, ok := a.rooms[roomCode]
 	if !ok {
+		if req.RoomAction == RoomActionJoin {
+			return ArenaEnterView{}, fmt.Errorf("room not found")
+		}
 		now := time.Now()
 		room = &ArenaRoom{
 			Code:           roomCode,
@@ -273,6 +288,8 @@ func (a *Arena) Enter(req EnterRequest) (ArenaEnterView, error) {
 			},
 		}
 		a.rooms[roomCode] = room
+	} else if req.RoomAction == RoomActionCreate {
+		return ArenaEnterView{}, fmt.Errorf("room already exists")
 	}
 
 	participant := findParticipantByToken(room, req.ClientToken)

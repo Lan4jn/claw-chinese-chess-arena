@@ -56,6 +56,59 @@ func TestEnterArenaCreatesRoomAndReturnsPublicAlias(t *testing.T) {
 	}
 }
 
+func TestEnterArenaJoinModeDoesNotCreateMissingRoom(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/arena/enter",
+		bytes.NewReader([]byte(`{"room_code":"join-only-room","client_token":"guest-token","room_action":"join","join_intent":"spectator"}`)),
+	)
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("POST /api/arena/enter room_action=join expected 404, got %d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "room not found") {
+		t.Fatalf("expected room not found error, got body=%s", rr.Body.String())
+	}
+}
+
+func TestEnterArenaCreateModeRejectsExistingRoom(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	firstReq := httptest.NewRequest(
+		http.MethodPost,
+		"/api/arena/enter",
+		bytes.NewReader([]byte(`{"room_code":"create-only-room","client_token":"host-token","room_action":"create","join_intent":"spectator"}`)),
+	)
+	firstReq.Header.Set("Content-Type", "application/json")
+	firstRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(firstRR, firstReq)
+	if firstRR.Code != http.StatusOK {
+		t.Fatalf("first create expected 200, got %d body=%s", firstRR.Code, firstRR.Body.String())
+	}
+
+	secondReq := httptest.NewRequest(
+		http.MethodPost,
+		"/api/arena/enter",
+		bytes.NewReader([]byte(`{"room_code":"create-only-room","client_token":"other-token","room_action":"create","join_intent":"spectator"}`)),
+	)
+	secondReq.Header.Set("Content-Type", "application/json")
+	secondRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(secondRR, secondReq)
+
+	if secondRR.Code != http.StatusConflict {
+		t.Fatalf("duplicate create expected 409, got %d body=%s", secondRR.Code, secondRR.Body.String())
+	}
+	if !strings.Contains(secondRR.Body.String(), "room already exists") {
+		t.Fatalf("expected room already exists error, got body=%s", secondRR.Body.String())
+	}
+}
+
 func TestArenaHTTPEnterThenFetchPublicRoom(t *testing.T) {
 	app := NewApp(NewMemorySnapshotStore())
 
@@ -1046,6 +1099,7 @@ func TestStaticAppWiresJoinAndPublicPollingFlow(t *testing.T) {
 
 	body := rr.Body.String()
 	for _, target := range []string{
+		`id="create-room-btn"`,
 		`id="join-room-btn"`,
 		`id="room-code-badge"`,
 		`id="room-status-badge"`,

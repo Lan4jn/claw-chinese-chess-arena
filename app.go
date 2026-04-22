@@ -30,6 +30,21 @@ func writeArenaRouteError(w http.ResponseWriter, err error, defaultStatus int) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
 
+func writeArenaEnterError(w http.ResponseWriter, err error) {
+	if err == nil {
+		return
+	}
+
+	status := http.StatusBadRequest
+	switch err.Error() {
+	case "room not found":
+		status = http.StatusNotFound
+	case "room already exists":
+		status = http.StatusConflict
+	}
+	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
 func NewApp(store SnapshotStore) *App {
 	return &App{arena: NewArena(store)}
 }
@@ -74,7 +89,7 @@ func (a *App) routes() http.Handler {
 		}
 		view, err := a.arena.Enter(req)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			writeArenaEnterError(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, view)

@@ -40,6 +40,7 @@ const dom = {
   roomCodeInput: null,
   displayNameInput: null,
   joinIntentSelect: null,
+  createRoomButton: null,
   joinRoomButton: null,
   randomRoomButton: null,
   viewButtons: [],
@@ -109,13 +110,17 @@ function setJoinNote(message, isError) {
   dom.joinNote.classList.toggle("is-error", Boolean(isError));
 }
 
-function setJoinBusy(isBusy) {
+function setJoinBusy(isBusy, action) {
   state.joinInFlight = Boolean(isBusy);
+  if (dom.createRoomButton) {
+    dom.createRoomButton.disabled = isBusy;
+    dom.createRoomButton.textContent = isBusy && action === "create" ? "创建中..." : "创建比赛";
+  }
   if (!dom.joinRoomButton) {
     return;
   }
   dom.joinRoomButton.disabled = isBusy;
-  dom.joinRoomButton.textContent = isBusy ? "进入中..." : "进入比赛";
+  dom.joinRoomButton.textContent = isBusy && action === "join" ? "加入中..." : "加入比赛";
 }
 
 function resetHostDirtyState() {
@@ -1120,7 +1125,7 @@ function startPolling() {
   }, POLL_INTERVAL_MS);
 }
 
-async function handleJoin() {
+async function handleEnter(roomAction) {
   if (state.joinInFlight) {
     return;
   }
@@ -1139,19 +1144,24 @@ async function handleJoin() {
     client_token: state.clientToken || generateClientToken(),
     display_name: displayName,
     join_intent: joinIntent,
+    room_action: roomAction || "join",
   };
 
-  setJoinBusy(true);
+  setJoinBusy(true, payload.room_action);
   try {
     await enterRoom(payload);
     await refreshAll();
     startPolling();
-    setJoinNote("已进入比赛，正在同步场地状态。");
+    if (payload.room_action === "create") {
+      setJoinNote("比赛已创建，你现在是主持人。");
+    } else {
+      setJoinNote("已加入比赛，正在同步场地状态。");
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : "进入比赛失败";
     setJoinNote(message, true);
   } finally {
-    setJoinBusy(false);
+    setJoinBusy(false, "");
   }
 }
 
@@ -1162,6 +1172,7 @@ function cacheDomElements() {
   dom.roomCodeInput = document.getElementById("room-code-input");
   dom.displayNameInput = document.getElementById("display-name-input");
   dom.joinIntentSelect = document.getElementById("join-intent-select");
+  dom.createRoomButton = document.getElementById("create-room-btn");
   dom.joinRoomButton = document.getElementById("join-room-btn");
   dom.randomRoomButton = document.getElementById("random-room-btn");
   dom.roomCodeBadge = document.getElementById("room-code-badge");
@@ -1250,13 +1261,19 @@ function bindEvents() {
       const roomCode = "room-" + Math.random().toString(36).slice(2, 8);
       dom.roomCodeInput.value = roomCode;
       saveStoredValue(STORAGE_KEYS.roomCode, roomCode);
-      setJoinNote("已生成比赛码，点击进入比赛。");
+      setJoinNote("已生成比赛码，可以创建新比赛或加入已有比赛。");
+    });
+  }
+
+  if (dom.createRoomButton) {
+    dom.createRoomButton.addEventListener("click", () => {
+      void handleEnter("create");
     });
   }
 
   if (dom.joinRoomButton) {
     dom.joinRoomButton.addEventListener("click", () => {
-      void handleJoin();
+      void handleEnter("join");
     });
   }
 
