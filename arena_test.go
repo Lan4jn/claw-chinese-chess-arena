@@ -337,8 +337,30 @@ func TestArenaAdvanceOnceRequestsAgentMoveOnAgentTurn(t *testing.T) {
 	if matchView.Turn != SideRed {
 		t.Fatalf("expected turn to return to red, got %q", matchView.Turn)
 	}
-	if matchView.Seats[SeatBlackPlayer].ParticipantID != guestView.Participant.ID {
-		t.Fatalf("expected black seat participant to stay the same")
+	if matchView.Seats[SeatBlackPlayer].ParticipantID == "" {
+		t.Fatalf("expected black seat to stay occupied after agent move")
+	}
+	if matchView.Seats[SeatBlackPlayer].ParticipantID == guestView.Participant.ID {
+		t.Fatalf("expected black seat occupant to be managed participant after binding")
+	}
+
+	hostRoom, err := arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() error = %v", err)
+	}
+	foundGuest := false
+	for _, participant := range hostRoom.Participants {
+		if participant.ID != guestView.Participant.ID {
+			continue
+		}
+		foundGuest = true
+		if participant.Seat != SeatSpectator {
+			t.Fatalf("expected original guest to remain as spectator, got seat %q", participant.Seat)
+		}
+		break
+	}
+	if !foundGuest {
+		t.Fatalf("expected original guest participant to remain in room")
 	}
 }
 
