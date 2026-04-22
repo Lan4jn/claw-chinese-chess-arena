@@ -244,6 +244,43 @@ func TestArenaHumanMoveRequiresCurrentSeatOwner(t *testing.T) {
 	}
 }
 
+func TestArenaHumanMoveRequiresCurrentSeatOwnerToken(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    "move-token-room",
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("host enter error = %v", err)
+	}
+	if _, err := arena.Enter(EnterRequest{
+		RoomCode:    "move-token-room",
+		ClientToken: "guest-token",
+		JoinIntent:  JoinIntentPlayer,
+	}); err != nil {
+		t.Fatalf("guest enter error = %v", err)
+	}
+	if _, err := arena.StartMatch(hostView.Room.Code, hostView.Participant.ID); err != nil {
+		t.Fatalf("StartMatch() error = %v", err)
+	}
+	if _, err := arena.SubmitMove(hostView.Room.Code, "guest-token", "a6-a5"); err == nil {
+		t.Fatalf("expected guest token to be rejected on red turn")
+	}
+	matchView, err := arena.SubmitMove(hostView.Room.Code, "host-token", "a6-a5")
+	if err != nil {
+		t.Fatalf("SubmitMove() with host token error = %v", err)
+	}
+	if matchView.LastMove != "a6-a5" {
+		t.Fatalf("expected last move a6-a5, got %q", matchView.LastMove)
+	}
+	if matchView.Turn != SideBlack {
+		t.Fatalf("expected turn to switch to black, got %q", matchView.Turn)
+	}
+}
+
 func TestArenaAdvanceOnceRequestsAgentMoveOnAgentTurn(t *testing.T) {
 	store := NewMemorySnapshotStore()
 	arena := NewArena(store)

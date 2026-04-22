@@ -773,6 +773,64 @@ func TestArenaHTTPHostSeatRemoveRejectsNonHostMutation(t *testing.T) {
 	}
 }
 
+func TestArenaHTTPHumanMoveSubmissionFlow(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	enterHostReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"http-move-room","client_token":"host-token","join_intent":"player"}`)))
+	enterHostReq.Header.Set("Content-Type", "application/json")
+	enterHostRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterHostRR, enterHostReq)
+	if enterHostRR.Code != http.StatusOK {
+		t.Fatalf("host enter expected 200, got %d body=%s", enterHostRR.Code, enterHostRR.Body.String())
+	}
+
+	enterGuestReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"http-move-room","client_token":"guest-token","join_intent":"player"}`)))
+	enterGuestReq.Header.Set("Content-Type", "application/json")
+	enterGuestRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterGuestRR, enterGuestReq)
+	if enterGuestRR.Code != http.StatusOK {
+		t.Fatalf("guest enter expected 200, got %d body=%s", enterGuestRR.Code, enterGuestRR.Body.String())
+	}
+
+	startReq := httptest.NewRequest(http.MethodPost, "/api/arena/http-move-room/match/start", bytes.NewReader([]byte(`{"host_token":"host-token"}`)))
+	startReq.Header.Set("Content-Type", "application/json")
+	startRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(startRR, startReq)
+	if startRR.Code != http.StatusOK {
+		t.Fatalf("POST /api/arena/{code}/match/start expected 200, got %d body=%s", startRR.Code, startRR.Body.String())
+	}
+
+	moveReq := httptest.NewRequest(http.MethodPost, "/api/arena/http-move-room/move", bytes.NewReader([]byte(`{"client_token":"guest-token","move":"a6-a5"}`)))
+	moveReq.Header.Set("Content-Type", "application/json")
+	moveRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(moveRR, moveReq)
+	if moveRR.Code != http.StatusBadRequest {
+		t.Fatalf("POST /api/arena/{code}/move with wrong player expected 400, got %d body=%s", moveRR.Code, moveRR.Body.String())
+	}
+
+	moveReq = httptest.NewRequest(http.MethodPost, "/api/arena/http-move-room/move", bytes.NewReader([]byte(`{"client_token":"host-token","move":"a6-a5"}`)))
+	moveReq.Header.Set("Content-Type", "application/json")
+	moveRR = httptest.NewRecorder()
+	app.routes().ServeHTTP(moveRR, moveReq)
+	if moveRR.Code != http.StatusOK {
+		t.Fatalf("POST /api/arena/{code}/move expected 200, got %d body=%s", moveRR.Code, moveRR.Body.String())
+	}
+
+	var moveResp struct {
+		LastMove string `json:"last_move"`
+		Turn     string `json:"turn"`
+	}
+	if err := json.NewDecoder(moveRR.Body).Decode(&moveResp); err != nil {
+		t.Fatalf("Decode() move response error = %v", err)
+	}
+	if moveResp.LastMove != "a6-a5" {
+		t.Fatalf("expected move response last_move a6-a5, got %q", moveResp.LastMove)
+	}
+	if moveResp.Turn != string(SideBlack) {
+		t.Fatalf("expected move response turn black, got %q", moveResp.Turn)
+	}
+}
+
 func TestStaticAssetsAreServed(t *testing.T) {
 	app := NewApp(NewMemorySnapshotStore())
 
@@ -809,6 +867,12 @@ func TestStaticAssetsAreServed(t *testing.T) {
 			}
 			if !strings.Contains(body, "delete state.hostSeatAPIKeyCache[seat]") {
 				t.Fatalf("expected %s to include host seat api key cache invalidation", path)
+			}
+			if !strings.Contains(body, "/move") {
+				t.Fatalf("expected %s to include human move submit endpoint wiring", path)
+			}
+			if !strings.Contains(body, "state.selectedFrom") {
+				t.Fatalf("expected %s to include board source selection state", path)
 			}
 		}
 	}

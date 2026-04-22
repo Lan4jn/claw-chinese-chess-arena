@@ -23,6 +23,7 @@ const state = {
   hostRoom: null,
   hostMatch: null,
   selectedFrom: "",
+  moveInFlight: false,
   pollTimer: null,
   lastError: "",
   refreshInFlight: false,
@@ -322,6 +323,16 @@ async function runMatchAction(action) {
   });
 }
 
+async function submitHumanMove(move) {
+  return apiRequest(hostPath("/move"), {
+    method: "POST",
+    body: {
+      client_token: state.clientToken,
+      move,
+    },
+  });
+}
+
 async function assignSeat(payload) {
   return apiRequest(hostPath("/seats/assign"), {
     method: "POST",
@@ -409,11 +420,89 @@ function renderSeatCard(element, seatType, seatInfo) {
     "</p></div>";
 }
 
+function squareForCoords(row, col) {
+  if (!Number.isInteger(row) || !Number.isInteger(col) || row < 0 || row > 9 || col < 0 || col > 8) {
+    return "";
+  }
+  return String.fromCharCode(97 + col) + String(row);
+}
+
+function parseMove(move) {
+  const raw = String(move || "").trim().toLowerCase();
+  const parts = raw.split("-");
+  if (parts.length !== 2 || parts[0].length < 2 || parts[1].length < 2) {
+    return null;
+  }
+  return {
+    from: parts[0],
+    to: parts[1],
+  };
+}
+
+function legalMoveMap() {
+  const result = {
+    byFrom: {},
+    allTargets: {},
+  };
+  const legalMoves = state.publicMatch && Array.isArray(state.publicMatch.legal_moves) ? state.publicMatch.legal_moves : [];
+  for (const move of legalMoves) {
+    const parsed = parseMove(move);
+    if (!parsed) {
+      continue;
+    }
+    if (!result.byFrom[parsed.from]) {
+      result.byFrom[parsed.from] = [];
+    }
+    result.byFrom[parsed.from].push(parsed.to);
+    result.allTargets[parsed.to] = true;
+  }
+  return result;
+}
+
+function currentTurnSeat() {
+  if (!state.publicMatch) {
+    return "";
+  }
+  if (state.publicMatch.turn === "red") {
+    return "red_player";
+  }
+  if (state.publicMatch.turn === "black") {
+    return "black_player";
+  }
+  return "";
+}
+
+function canCurrentParticipantSubmitHumanMove() {
+  if (!state.participant || !state.publicMatch || !state.publicRoom) {
+    return { allowed: false, reason: "等待比赛状态同步。" };
+  }
+  if (state.publicMatch.status !== "playing") {
+    return { allowed: false, reason: "当前比赛不可操作。" };
+  }
+  const turnSeat = currentTurnSeat();
+  if (!turnSeat || !state.publicRoom.seats || !state.publicRoom.seats[turnSeat]) {
+    return { allowed: false, reason: "未找到当前行动方席位。" };
+  }
+  const seatInfo = state.publicRoom.seats[turnSeat];
+  if (!seatInfo.participant_id || seatInfo.participant_id !== state.participant.id) {
+    return { allowed: false, reason: "当前行动方不是你，无法提交走子。" };
+  }
+  if (seatInfo.real_type && seatInfo.real_type !== "human") {
+    return { allowed: false, reason: "当前行动方不是 human，无法手动走子。" };
+  }
+  return { allowed: true, reason: "" };
+}
+
 function renderBoard() {
   if (!dom.boardGrid) {
     return;
   }
   dom.boardGrid.innerHTML = "";
+  const legal = legalMoveMap();
+  if (state.selectedFrom && !legal.byFrom[state.selectedFrom]) {
+    state.selectedFrom = "";
+  }
+  const selectedTargets = state.selectedFrom ? legal.byFrom[state.selectedFrom] || [] : [];
 
   const boardRows =
     state.publicMatch && Array.isArray(state.publicMatch.board_rows)
@@ -428,6 +517,16 @@ function renderBoard() {
       cell.className = "board-cell";
       cell.dataset.row = String(row);
       cell.dataset.col = String(col);
+      cell.dataset.square = squareForCoords(row, col);
+      if (state.selectedFrom && cell.dataset.square === state.selectedFrom) {
+        cell.classList.add("selected-from");
+      }
+      if (legal.byFrom[cell.dataset.square]) {
+        cell.classList.add("legal-from");
+      }
+      if (selectedTargets.includes(cell.dataset.square)) {
+        cell.classList.add("legal-target");
+      }
 
       if (piece !== ".") {
         const chip = document.createElement("span");
@@ -817,6 +916,84 @@ async function handleRemoveSeat(form) {
   setJoinNote("席位已清空。");
 }
 
+async function handleBoardCellClick(cell) {
+  if (!cell || state.moveInFlight) {
+    return;
+  }
+  const match = state.publicMatch;
+  if (!match || match.status !== "playing") {
+    setJoinNote("比赛未进行中，暂不可走子。", true);
+    return;
+  }
+
+  const permission = canCurrentParticipantSubmitHumanMove();
+  if (!permission.allowed) {
+    setJoinNote(permission.reason, true);
+    return;
+  }
+
+  const square = cell.dataset.square || "";
+  if (!square) {
+    return;
+  }
+  const legal = legalMoveMap();
+  if (!state.selectedFrom) {
+    if (!legal.byFrom[square]) {
+      if (dom.selectionHint) {
+        dom.selectionHint.textContent = "请选择一个可走子的起点。";
+      }
+      return;
+    }
+    state.selectedFrom = square;
+    renderBoard();
+    if (dom.selectionHint) {
+      dom.selectionHint.textContent = "已选中 " + square + "，请选择目标格。";
+    }
+    return;
+  }
+
+  if (square === state.selectedFrom) {
+    state.selectedFrom = "";
+    renderBoard();
+    if (dom.selectionHint) {
+      dom.selectionHint.textContent = "已取消选中。";
+    }
+    return;
+  }
+
+  const legalTargets = legal.byFrom[state.selectedFrom] || [];
+  if (legalTargets.includes(square)) {
+    const move = state.selectedFrom + "-" + square;
+    state.moveInFlight = true;
+    try {
+      state.publicMatch = await submitHumanMove(move);
+      state.selectedFrom = "";
+      setJoinNote("已提交走子：" + move);
+      renderSummary();
+      void refreshAll();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "提交走子失败";
+      setJoinNote(message, true);
+    } finally {
+      state.moveInFlight = false;
+    }
+    return;
+  }
+
+  if (legal.byFrom[square]) {
+    state.selectedFrom = square;
+    renderBoard();
+    if (dom.selectionHint) {
+      dom.selectionHint.textContent = "已改选 " + square + "，请选择目标格。";
+    }
+    return;
+  }
+
+  if (dom.selectionHint) {
+    dom.selectionHint.textContent = "目标格不合法，请重新选择。";
+  }
+}
+
 function renderSummary() {
   const room = state.publicRoom;
   const match = state.publicMatch;
@@ -851,7 +1028,14 @@ function renderSummary() {
     if (!match) {
       dom.selectionHint.textContent = "等待主持人开始比赛。";
     } else if (match.status === "playing") {
-      dom.selectionHint.textContent = "当前行动方：" + sideLabel(match.turn);
+      const permission = canCurrentParticipantSubmitHumanMove();
+      if (state.selectedFrom) {
+        dom.selectionHint.textContent = "已选中 " + state.selectedFrom + "，请选择目标格。";
+      } else if (permission.allowed) {
+        dom.selectionHint.textContent = "当前行动方：" + sideLabel(match.turn) + "，请选择起点。";
+      } else {
+        dom.selectionHint.textContent = permission.reason || "当前行动方：" + sideLabel(match.turn);
+      }
     } else {
       dom.selectionHint.textContent = "比赛状态：" + (match.status || "waiting");
     }
@@ -1042,9 +1226,22 @@ function bindEvents() {
   if (dom.clearSelectionButton) {
     dom.clearSelectionButton.addEventListener("click", () => {
       state.selectedFrom = "";
-      if (dom.selectionHint) {
-        dom.selectionHint.textContent = "已清除选中。";
+      renderSummary();
+      setJoinNote("已清除选中。");
+    });
+  }
+
+  if (dom.boardGrid) {
+    dom.boardGrid.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
       }
+      const cell = target.closest(".board-cell");
+      if (!(cell instanceof HTMLElement)) {
+        return;
+      }
+      void handleBoardCellClick(cell);
     });
   }
 
