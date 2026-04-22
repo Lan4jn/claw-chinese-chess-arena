@@ -26,6 +26,7 @@ const state = {
   pollTimer: null,
   lastError: "",
   refreshInFlight: false,
+  joinInFlight: false,
 };
 
 const dom = {
@@ -87,6 +88,15 @@ function setJoinNote(message, isError) {
   }
   dom.joinNote.textContent = message || "";
   dom.joinNote.classList.toggle("is-error", Boolean(isError));
+}
+
+function setJoinBusy(isBusy) {
+  state.joinInFlight = Boolean(isBusy);
+  if (!dom.joinRoomButton) {
+    return;
+  }
+  dom.joinRoomButton.disabled = isBusy;
+  dom.joinRoomButton.textContent = isBusy ? "进入中..." : "进入比赛";
 }
 
 function escapeHTML(value) {
@@ -529,6 +539,10 @@ function startPolling() {
 }
 
 async function handleJoin() {
+  if (state.joinInFlight) {
+    return;
+  }
+
   const roomCode = (dom.roomCodeInput ? dom.roomCodeInput.value : "").trim();
   const displayName = (dom.displayNameInput ? dom.displayNameInput.value : "").trim();
   const joinIntent = dom.joinIntentSelect ? dom.joinIntentSelect.value : "spectator";
@@ -545,6 +559,7 @@ async function handleJoin() {
     join_intent: joinIntent,
   };
 
+  setJoinBusy(true);
   try {
     await enterRoom(payload);
     await refreshAll();
@@ -553,6 +568,8 @@ async function handleJoin() {
   } catch (err) {
     const message = err instanceof Error ? err.message : "进入比赛失败";
     setJoinNote(message, true);
+  } finally {
+    setJoinBusy(false);
   }
 }
 
@@ -640,6 +657,7 @@ function boot() {
   hydratePersistedDefaults();
   applyViewMode(state.currentView);
   renderSummary();
+  setJoinBusy(false);
   setJoinNote("输入比赛码后即可进入比赛。");
 }
 
