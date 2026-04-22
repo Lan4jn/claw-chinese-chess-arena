@@ -707,6 +707,72 @@ func TestArenaHTTPHostSeatAssignRejectsNonHostMutation(t *testing.T) {
 	}
 }
 
+func TestArenaHTTPHostSeatRemoveRejectsNonHostMutation(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	enterHostReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"host-seat-remove-auth-room","client_token":"host-token","join_intent":"player"}`)))
+	enterHostReq.Header.Set("Content-Type", "application/json")
+	enterHostRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterHostRR, enterHostReq)
+	if enterHostRR.Code != http.StatusOK {
+		t.Fatalf("host enter expected 200, got %d body=%s", enterHostRR.Code, enterHostRR.Body.String())
+	}
+
+	enterGuestReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"host-seat-remove-auth-room","client_token":"guest-token","join_intent":"player"}`)))
+	enterGuestReq.Header.Set("Content-Type", "application/json")
+	enterGuestRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterGuestRR, enterGuestReq)
+	if enterGuestRR.Code != http.StatusOK {
+		t.Fatalf("guest enter expected 200, got %d body=%s", enterGuestRR.Code, enterGuestRR.Body.String())
+	}
+
+	publicBeforeReq := httptest.NewRequest(http.MethodGet, "/api/arena/host-seat-remove-auth-room", nil)
+	publicBeforeRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(publicBeforeRR, publicBeforeReq)
+	if publicBeforeRR.Code != http.StatusOK {
+		t.Fatalf("GET public room before seat remove mutation expected 200, got %d body=%s", publicBeforeRR.Code, publicBeforeRR.Body.String())
+	}
+	var before struct {
+		Seats map[string]struct {
+			ParticipantID string `json:"participant_id"`
+		} `json:"seats"`
+	}
+	if err := json.NewDecoder(publicBeforeRR.Body).Decode(&before); err != nil {
+		t.Fatalf("Decode() public before response error = %v", err)
+	}
+	beforeRedID := before.Seats[string(SeatRedPlayer)].ParticipantID
+	if beforeRedID == "" {
+		t.Fatalf("expected red seat to be occupied before failed remove mutation")
+	}
+
+	removeReq := httptest.NewRequest(http.MethodPost, "/api/arena/host-seat-remove-auth-room/seats/remove", bytes.NewReader([]byte(`{"host_token":"wrong-token","seat":"red_player"}`)))
+	removeReq.Header.Set("Content-Type", "application/json")
+	removeRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(removeRR, removeReq)
+	if removeRR.Code != http.StatusBadRequest {
+		t.Fatalf("POST /api/arena/{code}/seats/remove with wrong token expected 400, got %d body=%s", removeRR.Code, removeRR.Body.String())
+	}
+
+	publicAfterReq := httptest.NewRequest(http.MethodGet, "/api/arena/host-seat-remove-auth-room", nil)
+	publicAfterRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(publicAfterRR, publicAfterReq)
+	if publicAfterRR.Code != http.StatusOK {
+		t.Fatalf("GET public room after seat remove mutation expected 200, got %d body=%s", publicAfterRR.Code, publicAfterRR.Body.String())
+	}
+	var after struct {
+		Seats map[string]struct {
+			ParticipantID string `json:"participant_id"`
+		} `json:"seats"`
+	}
+	if err := json.NewDecoder(publicAfterRR.Body).Decode(&after); err != nil {
+		t.Fatalf("Decode() public after response error = %v", err)
+	}
+	afterRedID := after.Seats[string(SeatRedPlayer)].ParticipantID
+	if afterRedID != beforeRedID {
+		t.Fatalf("expected red seat participant unchanged on failed seat remove mutation, before=%q after=%q", beforeRedID, afterRedID)
+	}
+}
+
 func TestStaticAssetsAreServed(t *testing.T) {
 	app := NewApp(NewMemorySnapshotStore())
 
