@@ -55,6 +55,100 @@ func TestEnterArenaCreatesRoomAndReturnsPublicAlias(t *testing.T) {
 	}
 }
 
+func TestArenaHTTPEnterThenFetchPublicRoom(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	enterBody := []byte(`{"room_code":"Flow-Room","client_token":"flow-host-token","display_name":"Flow Host","join_intent":"spectator"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader(enterBody))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /api/arena/enter expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var enterDecoded struct {
+		Participant struct {
+			ID          string `json:"id"`
+			PublicAlias string `json:"public_alias"`
+			Seat        string `json:"seat"`
+		} `json:"participant"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&enterDecoded); err != nil {
+		t.Fatalf("Decode() enter response error = %v", err)
+	}
+	if enterDecoded.Participant.ID == "" {
+		t.Fatalf("expected participant id in enter response")
+	}
+	if enterDecoded.Participant.PublicAlias == "" {
+		t.Fatalf("expected participant public alias in enter response")
+	}
+	if enterDecoded.Participant.Seat != string(SeatSpectator) {
+		t.Fatalf("expected spectator seat for join_intent=spectator, got %q", enterDecoded.Participant.Seat)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/arena/flow-room", nil)
+	rr = httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /api/arena/{code} expected 200, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var roomDecoded struct {
+		Code              string `json:"code"`
+		HostParticipantID string `json:"host_participant_id"`
+		Status            string `json:"status"`
+		StepIntervalMS    int    `json:"step_interval_ms"`
+		RevealState       string `json:"reveal_state"`
+		DefaultView       string `json:"default_view"`
+		SpectatorCount    int    `json:"spectator_count"`
+		Seats             map[string]struct {
+			Type          string `json:"type"`
+			ParticipantID string `json:"participant_id"`
+			PublicAlias   string `json:"public_alias"`
+			RealType      string `json:"real_type"`
+		} `json:"seats"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&roomDecoded); err != nil {
+		t.Fatalf("Decode() public room response error = %v", err)
+	}
+	if roomDecoded.Code != "flow-room" {
+		t.Fatalf("expected normalized room code flow-room, got %q", roomDecoded.Code)
+	}
+	if roomDecoded.Status != string(RoomStatusWaiting) {
+		t.Fatalf("expected waiting room status, got %q", roomDecoded.Status)
+	}
+	if roomDecoded.StepIntervalMS <= 0 {
+		t.Fatalf("expected positive step_interval_ms, got %d", roomDecoded.StepIntervalMS)
+	}
+	if roomDecoded.RevealState != string(RevealStateHidden) {
+		t.Fatalf("expected hidden reveal_state, got %q", roomDecoded.RevealState)
+	}
+	if roomDecoded.DefaultView == "" {
+		t.Fatalf("expected default_view to be set")
+	}
+	if roomDecoded.HostParticipantID != "" {
+		t.Fatalf("expected host_participant_id hidden in public room, got %q", roomDecoded.HostParticipantID)
+	}
+	if roomDecoded.SpectatorCount != 1 {
+		t.Fatalf("expected spectator_count=1 after spectator entry, got %d", roomDecoded.SpectatorCount)
+	}
+
+	hostSeat, ok := roomDecoded.Seats[string(SeatHost)]
+	if !ok {
+		t.Fatalf("expected host seat in public room")
+	}
+	if hostSeat.ParticipantID != enterDecoded.Participant.ID {
+		t.Fatalf("expected host seat participant_id to match entrant id")
+	}
+	if hostSeat.PublicAlias != enterDecoded.Participant.PublicAlias {
+		t.Fatalf("expected host seat alias to match entrant alias")
+	}
+	if hostSeat.RealType != "" {
+		t.Fatalf("expected host seat real_type hidden in public room, got %q", hostSeat.RealType)
+	}
+}
+
 func TestArenaHTTPStartMatchAndFetchPublicState(t *testing.T) {
 	app := NewApp(NewMemorySnapshotStore())
 
