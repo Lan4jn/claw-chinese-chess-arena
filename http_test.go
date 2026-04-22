@@ -261,3 +261,18 @@ func TestStaticAssetsAreServed(t *testing.T) {
 		}
 	}
 }
+
+func TestStaticAppShellIsServed(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	req := httptest.NewRequest(http.MethodGet, "/static/app.js", nil)
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /static/app.js expected 200, got %d", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "function boot()") {
+		t.Fatalf("expected /static/app.js to include boot()")
+	}
+}
