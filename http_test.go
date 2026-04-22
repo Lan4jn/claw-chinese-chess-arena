@@ -368,6 +368,35 @@ func TestStaticAssetsAreServed(t *testing.T) {
 func TestStaticAppWiresJoinAndPublicPollingFlow(t *testing.T) {
 	app := NewApp(NewMemorySnapshotStore())
 
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET / expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+	for _, target := range []string{
+		`id="join-room-btn"`,
+		`id="room-code-badge"`,
+		`id="room-status-badge"`,
+		`id="interval-badge"`,
+		`id="reveal-badge"`,
+		`id="seat-red-card"`,
+		`id="seat-black-card"`,
+		`id="board-grid"`,
+		`id="event-list"`,
+		`id="participant-list"`,
+	} {
+		if !strings.Contains(body, target) {
+			t.Fatalf("expected static shell to include %q for room entry/public rendering flow", target)
+		}
+	}
+}
+
+func TestStaticAppDoesNotAutoEnterOnBoot(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
 	req := httptest.NewRequest(http.MethodGet, "/static/app.js", nil)
 	rr := httptest.NewRecorder()
 	app.routes().ServeHTTP(rr, req)
@@ -376,16 +405,7 @@ func TestStaticAppWiresJoinAndPublicPollingFlow(t *testing.T) {
 	}
 
 	body := rr.Body.String()
-	for _, snippet := range []string{
-		"function handleJoin()",
-		"function refreshAll()",
-		"function startPolling()",
-		"/api/arena/enter",
-		"/api/arena/\" + encodeURIComponent(state.roomCode)",
-		"/match",
-	} {
-		if !strings.Contains(body, snippet) {
-			t.Fatalf("expected /static/app.js to include %q for room entry/public polling flow", snippet)
-		}
+	if strings.Contains(body, "if (state.roomCode && state.clientToken)") {
+		t.Fatalf("expected app boot to avoid implicit room entry based on persisted state")
 	}
 }

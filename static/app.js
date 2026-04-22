@@ -478,24 +478,38 @@ async function refreshAll() {
     }
 
     if (state.isHost) {
-      state.hostRoom = await fetchHostRoom();
       try {
-        state.hostMatch = await fetchHostMatch();
+        state.hostRoom = await fetchHostRoom();
       } catch (err) {
         if (err && err.status === 403) {
           state.isHost = false;
-          state.hostRoom = null;
-          state.hostMatch = null;
-        } else if (err && err.status === 404) {
-          state.hostMatch = null;
-        } else {
-          throw err;
         }
+        state.hostRoom = null;
+        state.hostMatch = null;
+      }
+
+      if (state.isHost && state.hostRoom) {
+        try {
+          state.hostMatch = await fetchHostMatch();
+        } catch (err) {
+          if (err && err.status === 403) {
+            state.isHost = false;
+            state.hostRoom = null;
+            state.hostMatch = null;
+          } else if (err && err.status === 404) {
+            state.hostMatch = null;
+          } else {
+            state.hostMatch = null;
+          }
+        }
+      } else {
+        state.hostMatch = null;
       }
     } else {
       state.hostRoom = null;
       state.hostMatch = null;
     }
+
     renderSummary();
   } catch (err) {
     const message = err instanceof Error ? err.message : "刷新比赛状态失败";
@@ -627,10 +641,6 @@ function boot() {
   applyViewMode(state.currentView);
   renderSummary();
   setJoinNote("输入比赛码后即可进入比赛。");
-
-  if (state.roomCode && state.clientToken) {
-    void handleJoin();
-  }
 }
 
 document.addEventListener("DOMContentLoaded", boot);
