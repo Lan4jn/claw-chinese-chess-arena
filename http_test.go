@@ -259,20 +259,14 @@ func TestStaticAssetsAreServed(t *testing.T) {
 		if rr.Body.Len() == 0 {
 			t.Fatalf("GET %s returned empty body", path)
 		}
-	}
-}
-
-func TestStaticAppShellIsServed(t *testing.T) {
-	app := NewApp(NewMemorySnapshotStore())
-
-	req := httptest.NewRequest(http.MethodGet, "/static/app.js", nil)
-	rr := httptest.NewRecorder()
-	app.routes().ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("GET /static/app.js expected 200, got %d", rr.Code)
-	}
-	if !strings.Contains(rr.Body.String(), "function boot()") {
-		t.Fatalf("expected /static/app.js to include boot()")
+		if path == "/static/app.js" {
+			body := rr.Body.String()
+			if !strings.Contains(body, "DOMContentLoaded") {
+				t.Fatalf("expected %s to register a DOM ready bootstrapping hook", path)
+			}
+			if !strings.Contains(body, "/api/arena/enter") {
+				t.Fatalf("expected %s to include arena enter API wiring", path)
+			}
+		}
 	}
 }
