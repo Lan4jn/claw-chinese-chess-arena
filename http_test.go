@@ -330,6 +330,140 @@ func TestArenaHTTPHeadSupportOnGetEndpoints(t *testing.T) {
 	}
 }
 
+func TestArenaHTTPHostSettingsFlow(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	enterHostReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"host-settings-room","client_token":"host-token","join_intent":"player"}`)))
+	enterHostReq.Header.Set("Content-Type", "application/json")
+	enterHostRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterHostRR, enterHostReq)
+	if enterHostRR.Code != http.StatusOK {
+		t.Fatalf("host enter expected 200, got %d body=%s", enterHostRR.Code, enterHostRR.Body.String())
+	}
+
+	settingsReq := httptest.NewRequest(http.MethodPost, "/api/arena/host-settings-room/settings", bytes.NewReader([]byte(`{"host_token":"host-token","step_interval_ms":1200,"default_view":"commentary"}`)))
+	settingsReq.Header.Set("Content-Type", "application/json")
+	settingsRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(settingsRR, settingsReq)
+	if settingsRR.Code != http.StatusOK {
+		t.Fatalf("POST /api/arena/{code}/settings expected 200, got %d body=%s", settingsRR.Code, settingsRR.Body.String())
+	}
+
+	var hostView struct {
+		Room struct {
+			StepIntervalMS int    `json:"step_interval_ms"`
+			DefaultView    string `json:"default_view"`
+		} `json:"room"`
+	}
+	if err := json.NewDecoder(settingsRR.Body).Decode(&hostView); err != nil {
+		t.Fatalf("Decode() settings response error = %v", err)
+	}
+	if hostView.Room.StepIntervalMS != 1200 {
+		t.Fatalf("expected host room step_interval_ms=1200, got %d", hostView.Room.StepIntervalMS)
+	}
+	if hostView.Room.DefaultView != "commentary" {
+		t.Fatalf("expected host room default_view=commentary, got %q", hostView.Room.DefaultView)
+	}
+
+	publicReq := httptest.NewRequest(http.MethodGet, "/api/arena/host-settings-room", nil)
+	publicRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(publicRR, publicReq)
+	if publicRR.Code != http.StatusOK {
+		t.Fatalf("GET /api/arena/{code} expected 200, got %d body=%s", publicRR.Code, publicRR.Body.String())
+	}
+
+	var publicView struct {
+		StepIntervalMS int    `json:"step_interval_ms"`
+		DefaultView    string `json:"default_view"`
+	}
+	if err := json.NewDecoder(publicRR.Body).Decode(&publicView); err != nil {
+		t.Fatalf("Decode() public room response error = %v", err)
+	}
+	if publicView.StepIntervalMS != 1200 {
+		t.Fatalf("expected public room step_interval_ms=1200, got %d", publicView.StepIntervalMS)
+	}
+	if publicView.DefaultView != "commentary" {
+		t.Fatalf("expected public room default_view=commentary, got %q", publicView.DefaultView)
+	}
+}
+
+func TestArenaHTTPHostRevealFlow(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	enterHostReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"host-reveal-room","client_token":"host-token","join_intent":"player"}`)))
+	enterHostReq.Header.Set("Content-Type", "application/json")
+	enterHostRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterHostRR, enterHostReq)
+	if enterHostRR.Code != http.StatusOK {
+		t.Fatalf("host enter expected 200, got %d body=%s", enterHostRR.Code, enterHostRR.Body.String())
+	}
+
+	enterGuestReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"host-reveal-room","client_token":"guest-token","join_intent":"player"}`)))
+	enterGuestReq.Header.Set("Content-Type", "application/json")
+	enterGuestRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterGuestRR, enterGuestReq)
+	if enterGuestRR.Code != http.StatusOK {
+		t.Fatalf("guest enter expected 200, got %d body=%s", enterGuestRR.Code, enterGuestRR.Body.String())
+	}
+
+	revealReq := httptest.NewRequest(http.MethodPost, "/api/arena/host-reveal-room/reveal", bytes.NewReader([]byte(`{"host_token":"host-token","scope":"red"}`)))
+	revealReq.Header.Set("Content-Type", "application/json")
+	revealRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(revealRR, revealReq)
+	if revealRR.Code != http.StatusOK {
+		t.Fatalf("POST /api/arena/{code}/reveal scope=red expected 200, got %d body=%s", revealRR.Code, revealRR.Body.String())
+	}
+
+	var hostView struct {
+		Room struct {
+			RevealState string `json:"reveal_state"`
+		} `json:"room"`
+	}
+	if err := json.NewDecoder(revealRR.Body).Decode(&hostView); err != nil {
+		t.Fatalf("Decode() reveal response error = %v", err)
+	}
+	if hostView.Room.RevealState != string(RevealStatePartial) {
+		t.Fatalf("expected host reveal_state=%q after scope=red, got %q", string(RevealStatePartial), hostView.Room.RevealState)
+	}
+
+	publicReq := httptest.NewRequest(http.MethodGet, "/api/arena/host-reveal-room", nil)
+	publicRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(publicRR, publicReq)
+	if publicRR.Code != http.StatusOK {
+		t.Fatalf("GET /api/arena/{code} expected 200, got %d body=%s", publicRR.Code, publicRR.Body.String())
+	}
+
+	var publicView struct {
+		RevealState string `json:"reveal_state"`
+	}
+	if err := json.NewDecoder(publicRR.Body).Decode(&publicView); err != nil {
+		t.Fatalf("Decode() public room response error = %v", err)
+	}
+	if publicView.RevealState != string(RevealStatePartial) {
+		t.Fatalf("expected public reveal_state=%q after scope=red, got %q", string(RevealStatePartial), publicView.RevealState)
+	}
+
+	revealAllReq := httptest.NewRequest(http.MethodPost, "/api/arena/host-reveal-room/reveal", bytes.NewReader([]byte(`{"host_token":"host-token","scope":"all"}`)))
+	revealAllReq.Header.Set("Content-Type", "application/json")
+	revealAllRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(revealAllRR, revealAllReq)
+	if revealAllRR.Code != http.StatusOK {
+		t.Fatalf("POST /api/arena/{code}/reveal scope=all expected 200, got %d body=%s", revealAllRR.Code, revealAllRR.Body.String())
+	}
+
+	var hostViewAll struct {
+		Room struct {
+			RevealState string `json:"reveal_state"`
+		} `json:"room"`
+	}
+	if err := json.NewDecoder(revealAllRR.Body).Decode(&hostViewAll); err != nil {
+		t.Fatalf("Decode() reveal all response error = %v", err)
+	}
+	if hostViewAll.Room.RevealState != string(RevealStateFull) {
+		t.Fatalf("expected host reveal_state=%q after scope=all, got %q", string(RevealStateFull), hostViewAll.Room.RevealState)
+	}
+}
+
 func TestStaticAssetsAreServed(t *testing.T) {
 	app := NewApp(NewMemorySnapshotStore())
 

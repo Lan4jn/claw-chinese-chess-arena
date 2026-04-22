@@ -56,6 +56,21 @@ const dom = {
   eventList: null,
   participantList: null,
   clearSelectionButton: null,
+  hostDrawer: null,
+  hostDrawerToggle: null,
+  hostDrawerClose: null,
+  drawerBackdrop: null,
+  stepIntervalInput: null,
+  defaultViewSelect: null,
+  saveSettingsButton: null,
+  seatForms: [],
+  saveSeatButtons: [],
+  removeSeatButtons: [],
+  revealButtons: [],
+  startMatchButton: null,
+  pauseMatchButton: null,
+  resumeMatchButton: null,
+  resetMatchButton: null,
 };
 
 function loadStoredValue(key, fallback) {
@@ -258,6 +273,59 @@ async function fetchHostMatch() {
   return apiRequest(path);
 }
 
+function hostPath(pathSuffix) {
+  return "/api/arena/" + encodeURIComponent(state.roomCode) + pathSuffix;
+}
+
+async function saveRoomSettings(payload) {
+  return apiRequest(hostPath("/settings"), {
+    method: "POST",
+    body: {
+      host_token: state.clientToken,
+      ...payload,
+    },
+  });
+}
+
+async function setReveal(scope) {
+  return apiRequest(hostPath("/reveal"), {
+    method: "POST",
+    body: {
+      host_token: state.clientToken,
+      scope,
+    },
+  });
+}
+
+async function runMatchAction(action) {
+  return apiRequest(hostPath("/match/" + action), {
+    method: "POST",
+    body: {
+      host_token: state.clientToken,
+    },
+  });
+}
+
+async function assignSeat(payload) {
+  return apiRequest(hostPath("/seats/assign"), {
+    method: "POST",
+    body: {
+      host_token: state.clientToken,
+      ...payload,
+    },
+  });
+}
+
+async function removeSeat(seat) {
+  return apiRequest(hostPath("/seats/remove"), {
+    method: "POST",
+    body: {
+      host_token: state.clientToken,
+      seat,
+    },
+  });
+}
+
 async function enterRoom(payload) {
   const response = await apiRequest("/api/arena/enter", {
     method: "POST",
@@ -270,7 +338,7 @@ async function enterRoom(payload) {
   state.joinIntent = payload.join_intent || "spectator";
   state.isHost = Boolean(response.is_host);
   state.participant = response.participant || null;
-  state.publicRoom = response.public_room || null;
+  state.publicRoom = response.public_room || response.room || null;
   state.publicMatch = response.public_match || null;
   state.hostRoom = response.host_room || null;
   state.hostMatch = response.host_match || null;
@@ -420,6 +488,176 @@ function renderParticipants() {
     .join("");
 }
 
+function setHostDrawerOpen(isOpen) {
+  if (!dom.hostDrawer) {
+    return;
+  }
+  const shouldOpen = Boolean(isOpen && state.isHost);
+  dom.hostDrawer.classList.toggle("is-open", shouldOpen);
+  dom.hostDrawer.setAttribute("aria-hidden", shouldOpen ? "false" : "true");
+}
+
+function extractSeatBinding(hostRoom, seatType) {
+  if (!hostRoom || !hostRoom.room || !hostRoom.room.seats || !Array.isArray(hostRoom.participants)) {
+    return null;
+  }
+  const seat = hostRoom.room.seats[seatType];
+  if (!seat || !seat.participant_id) {
+    return null;
+  }
+  const participant = hostRoom.participants.find((item) => item.id === seat.participant_id);
+  if (!participant) {
+    return null;
+  }
+  return {
+    public_alias: participant.public_alias || "",
+    real_type: participant.real_type || "human",
+    name: participant.display_name || "",
+    base_url: participant.base_url || "",
+    api_key: "",
+  };
+}
+
+function populateSeatForm(form, binding) {
+  if (!form) {
+    return;
+  }
+  const safe = binding || {
+    public_alias: "",
+    real_type: "human",
+    name: "",
+    base_url: "",
+    api_key: "",
+  };
+  const aliasInput = form.elements.public_alias;
+  const typeSelect = form.elements.real_type;
+  const nameInput = form.elements.name;
+  const baseURLInput = form.elements.base_url;
+  const apiKeyInput = form.elements.api_key;
+
+  if (aliasInput) {
+    aliasInput.value = safe.public_alias || "";
+  }
+  if (typeSelect) {
+    typeSelect.value = safe.real_type || "human";
+  }
+  if (nameInput) {
+    nameInput.value = safe.name || "";
+  }
+  if (baseURLInput) {
+    baseURLInput.value = safe.base_url || "";
+  }
+  if (apiKeyInput) {
+    apiKeyInput.value = safe.api_key || "";
+  }
+}
+
+function renderHostControls() {
+  const isHostReady = state.isHost && state.hostRoom && state.hostRoom.room;
+
+  if (dom.hostDrawerToggle) {
+    dom.hostDrawerToggle.hidden = !state.isHost;
+  }
+  if (!state.isHost) {
+    setHostDrawerOpen(false);
+  }
+
+  if (!isHostReady) {
+    return;
+  }
+
+  const room = state.hostRoom.room;
+
+  if (dom.stepIntervalInput) {
+    dom.stepIntervalInput.value = room.step_interval_ms > 0 ? String(room.step_interval_ms) : "";
+  }
+  if (dom.defaultViewSelect) {
+    dom.defaultViewSelect.value = room.default_view === "commentary" ? "commentary" : "board";
+  }
+
+  dom.seatForms.forEach((form) => {
+    const seat = form.dataset.seat;
+    populateSeatForm(form, extractSeatBinding(state.hostRoom, seat));
+  });
+}
+
+function readSeatBindingFromForm(form) {
+  const aliasInput = form.elements.public_alias;
+  const typeSelect = form.elements.real_type;
+  const nameInput = form.elements.name;
+  const baseURLInput = form.elements.base_url;
+  const apiKeyInput = form.elements.api_key;
+  return {
+    public_alias: aliasInput ? aliasInput.value.trim() : "",
+    real_type: typeSelect ? typeSelect.value.trim() : "human",
+    name: nameInput ? nameInput.value.trim() : "",
+    base_url: baseURLInput ? baseURLInput.value.trim() : "",
+    api_key: apiKeyInput ? apiKeyInput.value.trim() : "",
+  };
+}
+
+async function handleSaveSettings() {
+  if (!state.isHost || !state.roomCode || !state.clientToken) {
+    return;
+  }
+  const interval = dom.stepIntervalInput ? Number(dom.stepIntervalInput.value) : 0;
+  const defaultView = dom.defaultViewSelect ? dom.defaultViewSelect.value : "board";
+  await saveRoomSettings({
+    step_interval_ms: Number.isFinite(interval) && interval > 0 ? Math.floor(interval) : 0,
+    default_view: defaultView === "commentary" ? "commentary" : "board",
+  });
+  await refreshAll();
+  setJoinNote("房间设置已保存。");
+}
+
+async function handleReveal(scope) {
+  if (!state.isHost || !scope) {
+    return;
+  }
+  await setReveal(scope);
+  await refreshAll();
+  setJoinNote("身份揭晓状态已更新。");
+}
+
+async function handleMatchControl(action) {
+  if (!state.isHost || !action) {
+    return;
+  }
+  state.publicMatch = await runMatchAction(action);
+  await refreshAll();
+  setJoinNote("比赛控制已执行：" + action);
+}
+
+async function handleSaveSeat(form) {
+  if (!state.isHost || !form) {
+    return;
+  }
+  const seat = form.dataset.seat;
+  if (!seat) {
+    return;
+  }
+  const binding = readSeatBindingFromForm(form);
+  await assignSeat({
+    seat,
+    binding,
+  });
+  await refreshAll();
+  setJoinNote("席位配置已保存。");
+}
+
+async function handleRemoveSeat(form) {
+  if (!state.isHost || !form) {
+    return;
+  }
+  const seat = form.dataset.seat;
+  if (!seat) {
+    return;
+  }
+  await removeSeat(seat);
+  await refreshAll();
+  setJoinNote("席位已清空。");
+}
+
 function renderSummary() {
   const room = state.publicRoom;
   const match = state.publicMatch;
@@ -466,6 +704,7 @@ function renderSummary() {
   renderBoard();
   renderEvents();
   renderParticipants();
+  renderHostControls();
   updateHeaderState();
 }
 
@@ -600,6 +839,21 @@ function cacheDomElements() {
   dom.participantList = document.getElementById("participant-list");
   dom.clearSelectionButton = document.getElementById("clear-selection-btn");
   dom.viewButtons = Array.from(document.querySelectorAll(".view-btn[data-view]"));
+  dom.hostDrawer = document.getElementById("host-drawer");
+  dom.hostDrawerToggle = document.getElementById("host-drawer-toggle");
+  dom.hostDrawerClose = document.getElementById("host-drawer-close");
+  dom.drawerBackdrop = document.getElementById("drawer-backdrop");
+  dom.stepIntervalInput = document.getElementById("step-interval-input");
+  dom.defaultViewSelect = document.getElementById("default-view-select");
+  dom.saveSettingsButton = document.getElementById("save-settings-btn");
+  dom.seatForms = Array.from(document.querySelectorAll(".seat-config[data-seat]"));
+  dom.saveSeatButtons = Array.from(document.querySelectorAll(".save-seat-btn"));
+  dom.removeSeatButtons = Array.from(document.querySelectorAll(".remove-seat-btn"));
+  dom.revealButtons = Array.from(document.querySelectorAll(".reveal-btn[data-scope]"));
+  dom.startMatchButton = document.getElementById("start-match-btn");
+  dom.pauseMatchButton = document.getElementById("pause-match-btn");
+  dom.resumeMatchButton = document.getElementById("resume-match-btn");
+  dom.resetMatchButton = document.getElementById("reset-match-btn");
 }
 
 function hydratePersistedDefaults() {
@@ -649,6 +903,79 @@ function bindEvents() {
       void handleJoin();
     });
   }
+
+  if (dom.hostDrawerToggle) {
+    dom.hostDrawerToggle.addEventListener("click", () => {
+      setHostDrawerOpen(true);
+    });
+  }
+  if (dom.hostDrawerClose) {
+    dom.hostDrawerClose.addEventListener("click", () => {
+      setHostDrawerOpen(false);
+    });
+  }
+  if (dom.drawerBackdrop) {
+    dom.drawerBackdrop.addEventListener("click", () => {
+      setHostDrawerOpen(false);
+    });
+  }
+
+  if (dom.saveSettingsButton) {
+    dom.saveSettingsButton.addEventListener("click", () => {
+      void handleSaveSettings().catch((err) => {
+        const message = err instanceof Error ? err.message : "保存房间设置失败";
+        setJoinNote(message, true);
+      });
+    });
+  }
+
+  dom.saveSeatButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const form = button.closest("form.seat-config");
+      void handleSaveSeat(form).catch((err) => {
+        const message = err instanceof Error ? err.message : "保存席位配置失败";
+        setJoinNote(message, true);
+      });
+    });
+  });
+
+  dom.removeSeatButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const form = button.closest("form.seat-config");
+      void handleRemoveSeat(form).catch((err) => {
+        const message = err instanceof Error ? err.message : "清空席位失败";
+        setJoinNote(message, true);
+      });
+    });
+  });
+
+  dom.revealButtons.forEach((button) => {
+    button.addEventListener("click", () => {
+      const scope = button.dataset.scope || "";
+      void handleReveal(scope).catch((err) => {
+        const message = err instanceof Error ? err.message : "更新揭晓状态失败";
+        setJoinNote(message, true);
+      });
+    });
+  });
+
+  const matchActionButtons = [
+    [dom.startMatchButton, "start"],
+    [dom.pauseMatchButton, "pause"],
+    [dom.resumeMatchButton, "resume"],
+    [dom.resetMatchButton, "reset"],
+  ];
+  matchActionButtons.forEach(([button, action]) => {
+    if (!button) {
+      return;
+    }
+    button.addEventListener("click", () => {
+      void handleMatchControl(action).catch((err) => {
+        const message = err instanceof Error ? err.message : "比赛控制执行失败";
+        setJoinNote(message, true);
+      });
+    });
+  });
 }
 
 function boot() {
