@@ -738,6 +738,12 @@ func TestStaticAssetsAreServed(t *testing.T) {
 			if !strings.Contains(body, "/api/arena/enter") {
 				t.Fatalf("expected %s to include arena enter API wiring", path)
 			}
+			if !strings.Contains(body, "syncSeatAPIKeyCacheWithHostRoom") {
+				t.Fatalf("expected %s to include host seat api key cache sync guard", path)
+			}
+			if !strings.Contains(body, "delete state.hostSeatAPIKeyCache[seat]") {
+				t.Fatalf("expected %s to include host seat api key cache invalidation", path)
+			}
 		}
 	}
 }

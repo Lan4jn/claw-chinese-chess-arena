@@ -583,6 +583,8 @@ function renderHostControls() {
     return;
   }
 
+  syncSeatAPIKeyCacheWithHostRoom();
+
   const room = state.hostRoom.room;
 
   if (dom.stepIntervalInput && !state.hostSettingsDirty) {
@@ -628,6 +630,58 @@ function seatParticipantForHostRoom(seat) {
     return null;
   }
   return state.hostRoom.participants.find((item) => item.id === seatInfo.participant_id) || null;
+}
+
+function seatAPIKeyCacheFingerprint(participant) {
+  if (!participant) {
+    return "";
+  }
+  return [
+    participant.id || "",
+    participant.connection || "",
+    participant.real_type || "",
+    participant.display_name || "",
+    participant.base_url || "",
+    participant.public_alias || "",
+  ].join("|");
+}
+
+function syncSeatAPIKeyCacheWithHostRoom() {
+  const cacheSeats = Object.keys(state.hostSeatAPIKeyCache);
+  if (cacheSeats.length === 0) {
+    return;
+  }
+  for (const seat of cacheSeats) {
+    const cached = state.hostSeatAPIKeyCache[seat];
+    if (!cached) {
+      delete state.hostSeatAPIKeyCache[seat];
+      continue;
+    }
+    if (typeof cached === "string") {
+      state.hostSeatAPIKeyCache[seat] = {
+        apiKey: cached,
+        participantID: "",
+        fingerprint: "",
+      };
+      continue;
+    }
+    const participant = seatParticipantForHostRoom(seat);
+    if (!participant) {
+      delete state.hostSeatAPIKeyCache[seat];
+      continue;
+    }
+    if (cached.participantID && cached.participantID !== participant.id) {
+      delete state.hostSeatAPIKeyCache[seat];
+      continue;
+    }
+    const nextFingerprint = seatAPIKeyCacheFingerprint(participant);
+    if (cached.fingerprint && cached.fingerprint !== nextFingerprint) {
+      delete state.hostSeatAPIKeyCache[seat];
+      continue;
+    }
+    cached.participantID = participant.id;
+    cached.fingerprint = nextFingerprint;
+  }
 }
 
 async function handleSaveSettings() {
@@ -704,16 +758,22 @@ async function handleSaveSeat(form) {
   const rawAPIKey = apiKeyInput ? apiKeyInput.value.trim() : "";
   const currentParticipant = seatParticipantForHostRoom(seat);
   const hasManagedSeatOccupant = currentParticipant && currentParticipant.connection === "managed";
-  const hasCachedAPIKey = Object.prototype.hasOwnProperty.call(state.hostSeatAPIKeyCache, seat);
+  const cachedAPIKeyEntry = state.hostSeatAPIKeyCache[seat];
+  const hasCachedAPIKey = Boolean(
+    cachedAPIKeyEntry &&
+      typeof cachedAPIKeyEntry === "object" &&
+      typeof cachedAPIKeyEntry.apiKey === "string"
+  );
+  let pendingCacheAPIKey = "";
 
   if (rawAPIKey === "__CLEAR__") {
     binding.api_key = "";
     delete state.hostSeatAPIKeyCache[seat];
   } else if (rawAPIKey !== "") {
     binding.api_key = rawAPIKey;
-    state.hostSeatAPIKeyCache[seat] = rawAPIKey;
+    pendingCacheAPIKey = rawAPIKey;
   } else if (hasCachedAPIKey) {
-    binding.api_key = state.hostSeatAPIKeyCache[seat];
+    binding.api_key = cachedAPIKeyEntry.apiKey;
   } else if (hasManagedSeatOccupant) {
     setJoinNote("为避免清空现有 API Key，请输入 API Key（或输入 __CLEAR__ 明确清空）。", true);
     return;
@@ -727,6 +787,18 @@ async function handleSaveSeat(form) {
   });
   markHostSeatDirty(seat, false);
   await refreshAll();
+  if (pendingCacheAPIKey) {
+    const updatedParticipant = seatParticipantForHostRoom(seat);
+    if (updatedParticipant) {
+      state.hostSeatAPIKeyCache[seat] = {
+        apiKey: pendingCacheAPIKey,
+        participantID: updatedParticipant.id,
+        fingerprint: seatAPIKeyCacheFingerprint(updatedParticipant),
+      };
+    } else {
+      delete state.hostSeatAPIKeyCache[seat];
+    }
+  }
   setJoinNote("席位配置已保存。");
 }
 
@@ -739,6 +811,7 @@ async function handleRemoveSeat(form) {
     return;
   }
   await removeSeat(seat);
+  delete state.hostSeatAPIKeyCache[seat];
   markHostSeatDirty(seat, false);
   await refreshAll();
   setJoinNote("席位已清空。");
