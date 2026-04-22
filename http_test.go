@@ -270,3 +270,28 @@ func TestStaticAssetsAreServed(t *testing.T) {
 		}
 	}
 }
+
+func TestStaticAppWiresJoinAndPublicPollingFlow(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	req := httptest.NewRequest(http.MethodGet, "/static/app.js", nil)
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /static/app.js expected 200, got %d", rr.Code)
+	}
+
+	body := rr.Body.String()
+	for _, snippet := range []string{
+		"function handleJoin()",
+		"function refreshAll()",
+		"function startPolling()",
+		"/api/arena/enter",
+		"/api/arena/\" + encodeURIComponent(state.roomCode)",
+		"/match",
+	} {
+		if !strings.Contains(body, snippet) {
+			t.Fatalf("expected /static/app.js to include %q for room entry/public polling flow", snippet)
+		}
+	}
+}
