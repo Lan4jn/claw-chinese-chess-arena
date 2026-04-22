@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -21,14 +22,14 @@ func NewApp(store SnapshotStore) *App {
 func (a *App) routes() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/health", methodHandler(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{
 			"status": "ok",
 			"time":   time.Now().Format(time.RFC3339),
 		})
-	})
+	}))
 
-	mux.HandleFunc("POST /api/arena/enter", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/arena/enter", methodHandler(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		var req EnterRequest
 		if err := decodeJSON(r, &req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -40,247 +41,275 @@ func (a *App) routes() http.Handler {
 			return
 		}
 		writeJSON(w, http.StatusOK, view)
-	})
+	}))
 
-	mux.HandleFunc("GET /api/arena/{code}", func(w http.ResponseWriter, r *http.Request) {
-		room, err := a.arena.PublicRoom(r.PathValue("code"))
-		if err != nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+	mux.HandleFunc("/api/arena/", func(w http.ResponseWriter, r *http.Request) {
+		code, tail, ok := arenaRouteParts(r.URL.Path)
+		if !ok {
+			http.NotFound(w, r)
 			return
 		}
-		writeJSON(w, http.StatusOK, room)
-	})
 
-	mux.HandleFunc("GET /api/arena/{code}/host", func(w http.ResponseWriter, r *http.Request) {
-		view, err := a.arena.HostRoom(r.PathValue("code"), r.URL.Query().Get("token"))
-		if err != nil {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-			return
+		switch r.Method {
+		case http.MethodGet:
+			switch tail {
+			case "":
+				room, err := a.arena.PublicRoom(code)
+				if err != nil {
+					writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, room)
+			case "host":
+				view, err := a.arena.HostRoom(code, r.URL.Query().Get("token"))
+				if err != nil {
+					writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, view)
+			case "host/match":
+				view, err := a.arena.HostMatch(code, r.URL.Query().Get("token"))
+				if err != nil {
+					writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, view)
+			case "match":
+				match, err := a.arena.PublicMatch(code)
+				if err != nil {
+					writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, match)
+			default:
+				http.NotFound(w, r)
+			}
+		case http.MethodPost:
+			switch tail {
+			case "match/start":
+				var req struct {
+					HostToken string `json:"host_token"`
+				}
+				if err := decodeJSON(r, &req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				view, err := a.arena.StartMatch(code, req.HostToken)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, view)
+			case "match/pause":
+				var req struct {
+					HostToken string `json:"host_token"`
+				}
+				if err := decodeJSON(r, &req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				view, err := a.arena.PauseMatch(code, req.HostToken)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, view)
+			case "match/resume":
+				var req struct {
+					HostToken string `json:"host_token"`
+				}
+				if err := decodeJSON(r, &req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				view, err := a.arena.ResumeMatch(code, req.HostToken)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, view)
+			case "match/reset":
+				var req struct {
+					HostToken string `json:"host_token"`
+				}
+				if err := decodeJSON(r, &req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				view, err := a.arena.ResetMatch(code, req.HostToken)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, view)
+			case "move":
+				var req struct {
+					ClientToken string `json:"client_token"`
+					Move        string `json:"move"`
+				}
+				if err := decodeJSON(r, &req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				view, err := a.arena.SubmitMove(code, req.ClientToken, req.Move)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, view)
+			case "settings":
+				var req struct {
+					HostToken string `json:"host_token"`
+					RoomSettingsRequest
+				}
+				if err := decodeJSON(r, &req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				if err := a.arena.UpdateSettings(code, req.HostToken, req.RoomSettingsRequest); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				room, err := a.arena.HostRoom(code, req.HostToken)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, room)
+			case "seats/assign":
+				var req struct {
+					HostToken string `json:"host_token"`
+					SeatAssignRequest
+				}
+				if err := decodeJSON(r, &req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				if err := a.arena.AssignSeat(code, req.HostToken, req.SeatAssignRequest); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				room, err := a.arena.HostRoom(code, req.HostToken)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, room)
+			case "seats/remove":
+				var req struct {
+					HostToken string   `json:"host_token"`
+					Seat      SeatType `json:"seat"`
+				}
+				if err := decodeJSON(r, &req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				if err := a.arena.RemoveSeat(code, req.HostToken, req.Seat); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				room, err := a.arena.HostRoom(code, req.HostToken)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, room)
+			case "reveal":
+				var req struct {
+					HostToken string `json:"host_token"`
+					Scope     string `json:"scope"`
+				}
+				if err := decodeJSON(r, &req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				if err := a.arena.SetReveal(code, req.HostToken, req.Scope); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				room, err := a.arena.HostRoom(code, req.HostToken)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, room)
+			case "agent/register":
+				var req AgentRegisterRequest
+				if err := decodeJSON(r, &req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				view, err := a.arena.RegisterAgent(code, req)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, view)
+			case "agent/act":
+				var req struct {
+					ClientToken string `json:"client_token"`
+					Move        string `json:"move"`
+				}
+				if err := decodeJSON(r, &req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				view, err := a.arena.SubmitMove(code, req.ClientToken, req.Move)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				writeJSON(w, http.StatusOK, view)
+			default:
+				http.NotFound(w, r)
+			}
+		default:
+			methodNotAllowed(w, http.MethodGet, http.MethodPost)
 		}
-		writeJSON(w, http.StatusOK, view)
-	})
-
-	mux.HandleFunc("GET /api/arena/{code}/host/match", func(w http.ResponseWriter, r *http.Request) {
-		view, err := a.arena.HostMatch(r.PathValue("code"), r.URL.Query().Get("token"))
-		if err != nil {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, view)
-	})
-
-	mux.HandleFunc("GET /api/arena/{code}/match", func(w http.ResponseWriter, r *http.Request) {
-		match, err := a.arena.PublicMatch(r.PathValue("code"))
-		if err != nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, match)
-	})
-
-	mux.HandleFunc("POST /api/arena/{code}/match/start", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			HostToken string `json:"host_token"`
-		}
-		if err := decodeJSON(r, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		view, err := a.arena.StartMatch(r.PathValue("code"), req.HostToken)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, view)
-	})
-
-	mux.HandleFunc("POST /api/arena/{code}/match/pause", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			HostToken string `json:"host_token"`
-		}
-		if err := decodeJSON(r, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		view, err := a.arena.PauseMatch(r.PathValue("code"), req.HostToken)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, view)
-	})
-
-	mux.HandleFunc("POST /api/arena/{code}/match/resume", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			HostToken string `json:"host_token"`
-		}
-		if err := decodeJSON(r, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		view, err := a.arena.ResumeMatch(r.PathValue("code"), req.HostToken)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, view)
-	})
-
-	mux.HandleFunc("POST /api/arena/{code}/match/reset", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			HostToken string `json:"host_token"`
-		}
-		if err := decodeJSON(r, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		view, err := a.arena.ResetMatch(r.PathValue("code"), req.HostToken)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, view)
-	})
-
-	mux.HandleFunc("POST /api/arena/{code}/move", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			ClientToken string `json:"client_token"`
-			Move        string `json:"move"`
-		}
-		if err := decodeJSON(r, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		view, err := a.arena.SubmitMove(r.PathValue("code"), req.ClientToken, req.Move)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, view)
-	})
-
-	mux.HandleFunc("POST /api/arena/{code}/settings", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			HostToken string `json:"host_token"`
-			RoomSettingsRequest
-		}
-		if err := decodeJSON(r, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		if err := a.arena.UpdateSettings(r.PathValue("code"), req.HostToken, req.RoomSettingsRequest); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		room, err := a.arena.HostRoom(r.PathValue("code"), req.HostToken)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, room)
-	})
-
-	mux.HandleFunc("POST /api/arena/{code}/seats/assign", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			HostToken string `json:"host_token"`
-			SeatAssignRequest
-		}
-		if err := decodeJSON(r, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		if err := a.arena.AssignSeat(r.PathValue("code"), req.HostToken, req.SeatAssignRequest); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		room, err := a.arena.HostRoom(r.PathValue("code"), req.HostToken)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, room)
-	})
-
-	mux.HandleFunc("POST /api/arena/{code}/seats/remove", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			HostToken string   `json:"host_token"`
-			Seat      SeatType `json:"seat"`
-		}
-		if err := decodeJSON(r, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		if err := a.arena.RemoveSeat(r.PathValue("code"), req.HostToken, req.Seat); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		room, err := a.arena.HostRoom(r.PathValue("code"), req.HostToken)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, room)
-	})
-
-	mux.HandleFunc("POST /api/arena/{code}/reveal", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			HostToken string `json:"host_token"`
-			Scope     string `json:"scope"`
-		}
-		if err := decodeJSON(r, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		if err := a.arena.SetReveal(r.PathValue("code"), req.HostToken, req.Scope); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		room, err := a.arena.HostRoom(r.PathValue("code"), req.HostToken)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, room)
-	})
-
-	mux.HandleFunc("POST /api/arena/{code}/agent/register", func(w http.ResponseWriter, r *http.Request) {
-		var req AgentRegisterRequest
-		if err := decodeJSON(r, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		view, err := a.arena.RegisterAgent(r.PathValue("code"), req)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, view)
-	})
-
-	mux.HandleFunc("POST /api/arena/{code}/agent/act", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			ClientToken string `json:"client_token"`
-			Move        string `json:"move"`
-		}
-		if err := decodeJSON(r, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		view, err := a.arena.SubmitMove(r.PathValue("code"), req.ClientToken, req.Move)
-		if err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-			return
-		}
-		writeJSON(w, http.StatusOK, view)
 	})
 
 	fileServer := http.FileServer(http.Dir("static"))
-	mux.Handle("GET /static/", http.StripPrefix("/static/", fileServer))
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/static/", http.StripPrefix("/static/", fileServer))
+	mux.HandleFunc("/", methodHandler(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, filepath.Join("static", "index.html"))
-	})
+	}))
 
 	return loggingMiddleware(mux)
+}
+
+func methodHandler(method string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != method {
+			methodNotAllowed(w, method)
+			return
+		}
+		next(w, r)
+	}
+}
+
+func methodNotAllowed(w http.ResponseWriter, methods ...string) {
+	w.Header().Set("Allow", strings.Join(methods, ", "))
+	http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+}
+
+func arenaRouteParts(path string) (string, string, bool) {
+	const prefix = "/api/arena/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", "", false
+	}
+	parts := strings.Split(strings.TrimPrefix(path, prefix), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		return "", "", false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return "", "", false
+		}
+	}
+	if len(parts) == 1 {
+		return parts[0], "", true
+	}
+	return parts[0], strings.Join(parts[1:], "/"), true
 }
 
 func decodeJSON(r *http.Request, dst any) error {
