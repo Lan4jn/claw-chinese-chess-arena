@@ -619,15 +619,17 @@ async function handleSaveSettings() {
     return;
   }
   const room = state.hostRoom && state.hostRoom.room ? state.hostRoom.room : null;
-  const interval = dom.stepIntervalInput ? Number(dom.stepIntervalInput.value) : 0;
+  const intervalText = dom.stepIntervalInput ? dom.stepIntervalInput.value.trim() : "";
+  const intervalRaw = intervalText === "" ? Number.NaN : Number(intervalText);
   const defaultView = dom.defaultViewSelect ? dom.defaultViewSelect.value : "board";
   const normalizedDefaultView = defaultView === "commentary" ? "commentary" : "board";
-  const hasPositiveInterval = Number.isFinite(interval) && interval > 0;
-  const nextInterval = hasPositiveInterval ? Math.floor(interval) : 0;
-  const intervalChanged = hasPositiveInterval && room && room.step_interval_ms !== nextInterval;
+  const normalizedInterval = Number.isFinite(intervalRaw) ? Math.floor(intervalRaw) : 0;
+  const hasValidInterval = normalizedInterval > 0;
+  const hasIntervalInput = intervalText !== "";
+  const intervalChanged = hasValidInterval && room && room.step_interval_ms !== normalizedInterval;
   const defaultViewChanged = room && room.default_view !== normalizedDefaultView;
 
-  if (!hasPositiveInterval && !defaultViewChanged) {
+  if (hasIntervalInput && !hasValidInterval && !defaultViewChanged) {
     setJoinNote("未保存：步间隔需大于 0。", true);
     return;
   }
@@ -640,14 +642,14 @@ async function handleSaveSettings() {
   const payload = {
     default_view: normalizedDefaultView,
   };
-  if (hasPositiveInterval) {
-    payload.step_interval_ms = nextInterval;
+  if (hasValidInterval) {
+    payload.step_interval_ms = normalizedInterval;
   }
 
   await saveRoomSettings(payload);
   state.hostSettingsDirty = false;
   await refreshAll();
-  if (!hasPositiveInterval && defaultViewChanged) {
+  if (hasIntervalInput && !hasValidInterval && defaultViewChanged) {
     setJoinNote("默认视图已保存；步间隔需大于 0 才会更新。");
     return;
   }

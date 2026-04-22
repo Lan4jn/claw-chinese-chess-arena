@@ -577,6 +577,73 @@ func TestArenaHTTPHostRevealRejectsNonHostMutation(t *testing.T) {
 	}
 }
 
+func TestArenaHTTPHostMatchStartRejectsNonHostMutation(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	enterHostReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"host-match-auth-room","client_token":"host-token","join_intent":"player"}`)))
+	enterHostReq.Header.Set("Content-Type", "application/json")
+	enterHostRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterHostRR, enterHostReq)
+	if enterHostRR.Code != http.StatusOK {
+		t.Fatalf("host enter expected 200, got %d body=%s", enterHostRR.Code, enterHostRR.Body.String())
+	}
+
+	enterGuestReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"host-match-auth-room","client_token":"guest-token","join_intent":"player"}`)))
+	enterGuestReq.Header.Set("Content-Type", "application/json")
+	enterGuestRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterGuestRR, enterGuestReq)
+	if enterGuestRR.Code != http.StatusOK {
+		t.Fatalf("guest enter expected 200, got %d body=%s", enterGuestRR.Code, enterGuestRR.Body.String())
+	}
+
+	publicBeforeReq := httptest.NewRequest(http.MethodGet, "/api/arena/host-match-auth-room", nil)
+	publicBeforeRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(publicBeforeRR, publicBeforeReq)
+	if publicBeforeRR.Code != http.StatusOK {
+		t.Fatalf("GET public room before match mutation expected 200, got %d body=%s", publicBeforeRR.Code, publicBeforeRR.Body.String())
+	}
+	var before struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(publicBeforeRR.Body).Decode(&before); err != nil {
+		t.Fatalf("Decode() public before response error = %v", err)
+	}
+
+	startReq := httptest.NewRequest(http.MethodPost, "/api/arena/host-match-auth-room/match/start", bytes.NewReader([]byte(`{"host_token":"wrong-token"}`)))
+	startReq.Header.Set("Content-Type", "application/json")
+	startRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(startRR, startReq)
+	if startRR.Code != http.StatusBadRequest {
+		t.Fatalf("POST /api/arena/{code}/match/start with wrong token expected 400, got %d body=%s", startRR.Code, startRR.Body.String())
+	}
+
+	publicAfterReq := httptest.NewRequest(http.MethodGet, "/api/arena/host-match-auth-room", nil)
+	publicAfterRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(publicAfterRR, publicAfterReq)
+	if publicAfterRR.Code != http.StatusOK {
+		t.Fatalf("GET public room after match mutation expected 200, got %d body=%s", publicAfterRR.Code, publicAfterRR.Body.String())
+	}
+	var after struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(publicAfterRR.Body).Decode(&after); err != nil {
+		t.Fatalf("Decode() public after response error = %v", err)
+	}
+	if after.Status != before.Status {
+		t.Fatalf("expected room status unchanged on failed match start mutation, before=%q after=%q", before.Status, after.Status)
+	}
+	if after.Status != string(RoomStatusWaiting) {
+		t.Fatalf("expected room status to remain waiting, got %q", after.Status)
+	}
+
+	publicMatchReq := httptest.NewRequest(http.MethodGet, "/api/arena/host-match-auth-room/match", nil)
+	publicMatchRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(publicMatchRR, publicMatchReq)
+	if publicMatchRR.Code != http.StatusNotFound {
+		t.Fatalf("GET /api/arena/{code}/match expected 404 after failed start, got %d body=%s", publicMatchRR.Code, publicMatchRR.Body.String())
+	}
+}
+
 func TestStaticAssetsAreServed(t *testing.T) {
 	app := NewApp(NewMemorySnapshotStore())
 
