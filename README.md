@@ -10,6 +10,12 @@
 
 当前后端兼容目标是 Go 1.20 这一档，适合继续做 Windows 7 / 2008 R2 方向的实机验证，同时也可以正常编译 Linux 版本。
 
+发布说明：
+
+- 编译后的可执行文件会内嵌 `static/` 前端资源
+- 发布包可以脱离项目源码目录单独启动
+- 不需要再额外拷贝 `static/index.html`、`static/app.js`、`static/style.css`
+
 ## 启动
 
 默认监听 `:8080`：
@@ -18,13 +24,55 @@
 GOTOOLCHAIN=local go run .
 ```
 
+查看启动参数：
+
+```bash
+GOTOOLCHAIN=local go run . --help
+```
+
 自定义端口：
 
 ```bash
-PORT=9090 GOTOOLCHAIN=local go run .
+GOTOOLCHAIN=local go run . --port 9090
 ```
 
-启动后默认访问：
+监听指定 IP：
+
+```bash
+GOTOOLCHAIN=local go run . --host 0.0.0.0 --port 8080
+```
+
+监听 IPv6：
+
+```bash
+GOTOOLCHAIN=local go run . --host :: --port 8080
+```
+
+直接指定完整监听地址：
+
+```bash
+GOTOOLCHAIN=local go run . --listen 192.168.1.20:8080
+```
+
+直接指定 IPv6 监听地址：
+
+```bash
+GOTOOLCHAIN=local go run . --listen [::]:8080
+```
+
+后台启动：
+
+```bash
+GOTOOLCHAIN=local go run . --host 0.0.0.0 --port 8080 --background
+```
+
+后台模式日志默认写入：
+
+```text
+runtime/arena.log
+```
+
+启动后本机默认访问：
 
 ```text
 http://127.0.0.1:8080
@@ -35,6 +83,31 @@ http://127.0.0.1:8080
 ```text
 runtime/arena-snapshot.json
 ```
+
+参数优先级：
+
+- 命令行参数优先
+- 其次是环境变量 `PORT` / `HOST` / `LISTEN` / `SNAPSHOT_PATH`
+- 最后才是内置默认值
+
+IPv6 说明：
+
+- `--host :: --port 8080` 会监听 IPv6 地址 `[::]:8080`
+- `--host [::] --port 8080` 也支持，程序会自动归一化
+- 如果你想完整控制监听地址，直接用 `--listen [::]:8080`
+
+如果你希望其他机器通过 IP 访问这台服务，建议显式使用：
+
+```bash
+GOTOOLCHAIN=local go run . --host 0.0.0.0 --port 8080
+```
+
+如果仍然不能访问，通常就不是程序监听地址的问题，而是操作系统防火墙或云主机安全组没有放行对应端口。
+
+二进制启动说明：
+
+- 直接运行编译产物即可，前端页面和静态资源已经打进包内
+- 这也是为了避免从 `dist/`、计划任务、服务管理器或其他工作目录启动时出现首页 `404 page not found`
 
 ## 基本使用
 

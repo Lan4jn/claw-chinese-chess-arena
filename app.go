@@ -6,7 +6,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -354,10 +353,14 @@ func (a *App) routes() http.Handler {
 		handler(w, r, code)
 	})
 
-	fileServer := http.FileServer(http.Dir("static"))
+	fileServer := http.FileServer(http.FS(embeddedStaticFS))
 	mux.Handle("/static/", getOrHeadHandler(http.StripPrefix("/static/", fileServer)))
 	mux.Handle("/", getOrHeadHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, filepath.Join("static", "index.html"))
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write(embeddedIndexHTML); err != nil {
+			log.Printf("write embedded index failed: %v", err)
+		}
 	})))
 
 	return loggingMiddleware(mux)

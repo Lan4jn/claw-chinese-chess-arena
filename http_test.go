@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -955,6 +956,34 @@ func TestArenaHTTPHumanMoveSubmissionFlow(t *testing.T) {
 	}
 	if moveResp.Turn != string(SideBlack) {
 		t.Fatalf("expected move response turn black, got %q", moveResp.Turn)
+	}
+}
+
+func TestStaticAssetsAreServedFromAnyWorkingDirectory(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+
+	tempDir := t.TempDir()
+	if err := os.Chdir(tempDir); err != nil {
+		t.Fatalf("Chdir(%q) error = %v", tempDir, err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalWD); err != nil {
+			t.Fatalf("restore Chdir(%q) error = %v", originalWD, err)
+		}
+	})
+
+	for _, path := range []string{"/", "/static/style.css", "/static/app.js"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rr := httptest.NewRecorder()
+		app.routes().ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("GET %s expected 200 from cwd=%q, got %d body=%s", path, tempDir, rr.Code, rr.Body.String())
+		}
 	}
 }
 
