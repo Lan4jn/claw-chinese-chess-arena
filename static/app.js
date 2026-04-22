@@ -29,6 +29,7 @@ const state = {
   joinInFlight: false,
   hostSettingsDirty: false,
   hostSeatDirty: {},
+  hostSeatAPIKeyCache: {},
 };
 
 const dom = {
@@ -119,6 +120,7 @@ function setJoinBusy(isBusy) {
 function resetHostDirtyState() {
   state.hostSettingsDirty = false;
   state.hostSeatDirty = {};
+  state.hostSeatAPIKeyCache = {};
 }
 
 function markHostSeatDirty(seat, isDirty) {
@@ -614,6 +616,20 @@ function readSeatBindingFromForm(form) {
   };
 }
 
+function seatParticipantForHostRoom(seat) {
+  if (!state.hostRoom || !state.hostRoom.room || !state.hostRoom.room.seats) {
+    return null;
+  }
+  if (!Array.isArray(state.hostRoom.participants)) {
+    return null;
+  }
+  const seatInfo = state.hostRoom.room.seats[seat];
+  if (!seatInfo || !seatInfo.participant_id) {
+    return null;
+  }
+  return state.hostRoom.participants.find((item) => item.id === seatInfo.participant_id) || null;
+}
+
 async function handleSaveSettings() {
   if (!state.isHost || !state.roomCode || !state.clientToken) {
     return;
@@ -682,7 +698,29 @@ async function handleSaveSeat(form) {
   if (!seat) {
     return;
   }
+
   const binding = readSeatBindingFromForm(form);
+  const apiKeyInput = form.elements.api_key;
+  const rawAPIKey = apiKeyInput ? apiKeyInput.value.trim() : "";
+  const currentParticipant = seatParticipantForHostRoom(seat);
+  const hasManagedSeatOccupant = currentParticipant && currentParticipant.connection === "managed";
+  const hasCachedAPIKey = Object.prototype.hasOwnProperty.call(state.hostSeatAPIKeyCache, seat);
+
+  if (rawAPIKey === "__CLEAR__") {
+    binding.api_key = "";
+    delete state.hostSeatAPIKeyCache[seat];
+  } else if (rawAPIKey !== "") {
+    binding.api_key = rawAPIKey;
+    state.hostSeatAPIKeyCache[seat] = rawAPIKey;
+  } else if (hasCachedAPIKey) {
+    binding.api_key = state.hostSeatAPIKeyCache[seat];
+  } else if (hasManagedSeatOccupant) {
+    setJoinNote("为避免清空现有 API Key，请输入 API Key（或输入 __CLEAR__ 明确清空）。", true);
+    return;
+  } else {
+    binding.api_key = "";
+  }
+
   await assignSeat({
     seat,
     binding,
