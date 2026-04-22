@@ -604,13 +604,14 @@ function cacheDomElements() {
 
 function hydratePersistedDefaults() {
   state.clientToken = loadStoredValue(STORAGE_KEYS.clientToken, "");
-  state.roomCode = loadStoredValue(STORAGE_KEYS.roomCode, "");
+  const persistedRoomCode = loadStoredValue(STORAGE_KEYS.roomCode, "");
+  state.roomCode = "";
   state.displayName = loadStoredValue(STORAGE_KEYS.displayName, "");
   state.joinIntent = loadStoredValue(STORAGE_KEYS.joinIntent, "spectator");
   state.currentView = loadStoredValue(STORAGE_KEYS.currentView, "board");
 
   if (dom.roomCodeInput) {
-    dom.roomCodeInput.value = state.roomCode;
+    dom.roomCodeInput.value = persistedRoomCode;
   }
   if (dom.displayNameInput) {
     dom.displayNameInput.value = state.displayName;
@@ -638,7 +639,6 @@ function bindEvents() {
     dom.randomRoomButton.addEventListener("click", () => {
       const roomCode = "room-" + Math.random().toString(36).slice(2, 8);
       dom.roomCodeInput.value = roomCode;
-      state.roomCode = roomCode;
       saveStoredValue(STORAGE_KEYS.roomCode, roomCode);
       setJoinNote("已生成比赛码，点击进入比赛。");
     });
