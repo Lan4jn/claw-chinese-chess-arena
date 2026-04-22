@@ -152,6 +152,90 @@ func TestArenaHTTPRoutingCompatibilityEndpoints(t *testing.T) {
 	}
 }
 
+func TestArenaHTTPRoutingMethodContracts(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/arena/method-room/match/start", nil)
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET /api/arena/{code}/match/start expected 405, got %d", rr.Code)
+	}
+	if got := rr.Header().Get("Allow"); got != http.MethodPost {
+		t.Fatalf("GET /api/arena/{code}/match/start Allow expected %q, got %q", http.MethodPost, got)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/arena/method-room/match", bytes.NewReader([]byte(`{}`)))
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /api/arena/{code}/match expected 405, got %d", rr.Code)
+	}
+	if got := rr.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Fatalf("POST /api/arena/{code}/match Allow expected %q, got %q", "GET, HEAD", got)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/static/style.css", bytes.NewReader([]byte("ignored")))
+	rr = httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /static/style.css expected 405, got %d", rr.Code)
+	}
+	if got := rr.Header().Get("Allow"); got != "GET, HEAD" {
+		t.Fatalf("POST /static/style.css Allow expected %q, got %q", "GET, HEAD", got)
+	}
+}
+
+func TestArenaHTTPHeadSupportOnGetEndpoints(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	req := httptest.NewRequest(http.MethodHead, "/api/health", nil)
+	rr := httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("HEAD /api/health expected 200, got %d", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"head-room","client_token":"head-host","join_intent":"player"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("setup enter host expected 200, got %d", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"head-room","client_token":"head-guest","join_intent":"player"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("setup enter guest expected 200, got %d", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/arena/head-room/match/start", bytes.NewReader([]byte(`{"host_token":"head-host"}`)))
+	req.Header.Set("Content-Type", "application/json")
+	rr = httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("setup start match expected 200, got %d", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodHead, "/api/arena/head-room/match", nil)
+	rr = httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("HEAD /api/arena/{code}/match expected 200, got %d", rr.Code)
+	}
+
+	req = httptest.NewRequest(http.MethodHead, "/static/style.css", nil)
+	rr = httptest.NewRecorder()
+	app.routes().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("HEAD /static/style.css expected 200, got %d", rr.Code)
+	}
+}
+
 func TestStaticAssetsAreServed(t *testing.T) {
 	app := NewApp(NewMemorySnapshotStore())
 

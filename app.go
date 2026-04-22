@@ -22,12 +22,12 @@ func NewApp(store SnapshotStore) *App {
 func (a *App) routes() http.Handler {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/api/health", methodHandler(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/api/health", getOrHeadHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{
 			"status": "ok",
 			"time":   time.Now().Format(time.RFC3339),
 		})
-	}))
+	})))
 
 	mux.HandleFunc("/api/arena/enter", methodHandler(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		var req EnterRequest
@@ -50,7 +50,17 @@ func (a *App) routes() http.Handler {
 			return
 		}
 
-		switch r.Method {
+		allowedMethods := arenaAllowedMethods(tail)
+		if len(allowedMethods) == 0 {
+			http.NotFound(w, r)
+			return
+		}
+		if !methodAllowed(r.Method, allowedMethods) {
+			methodNotAllowed(w, allowedMethods...)
+			return
+		}
+
+		switch methodForDispatch(r.Method) {
 		case http.MethodGet:
 			switch tail {
 			case "":
@@ -263,16 +273,14 @@ func (a *App) routes() http.Handler {
 			default:
 				http.NotFound(w, r)
 			}
-		default:
-			methodNotAllowed(w, http.MethodGet, http.MethodPost)
 		}
 	})
 
 	fileServer := http.FileServer(http.Dir("static"))
-	mux.Handle("/static/", http.StripPrefix("/static/", fileServer))
-	mux.HandleFunc("/", methodHandler(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/static/", getOrHeadHandler(http.StripPrefix("/static/", fileServer)))
+	mux.Handle("/", getOrHeadHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, filepath.Join("static", "index.html"))
-	}))
+	})))
 
 	return loggingMiddleware(mux)
 }
@@ -287,9 +295,47 @@ func methodHandler(method string, next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func getOrHeadHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			methodNotAllowed(w, http.MethodGet, http.MethodHead)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func methodNotAllowed(w http.ResponseWriter, methods ...string) {
 	w.Header().Set("Allow", strings.Join(methods, ", "))
 	http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+}
+
+func methodAllowed(method string, allowed []string) bool {
+	for _, m := range allowed {
+		if method == m {
+			return true
+		}
+	}
+	return false
+}
+
+func methodForDispatch(method string) string {
+	if method == http.MethodHead {
+		return http.MethodGet
+	}
+	return method
+}
+
+func arenaAllowedMethods(tail string) []string {
+	switch tail {
+	case "", "host", "host/match", "match":
+		return []string{http.MethodGet, http.MethodHead}
+	case "match/start", "match/pause", "match/resume", "match/reset",
+		"move", "settings", "seats/assign", "seats/remove", "reveal", "agent/register", "agent/act":
+		return []string{http.MethodPost}
+	default:
+		return nil
+	}
 }
 
 func arenaRouteParts(path string) (string, string, bool) {
