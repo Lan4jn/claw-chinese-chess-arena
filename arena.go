@@ -391,43 +391,7 @@ func (a *Arena) BindSeatAgent(code string, hostParticipantID string, seatType Se
 	if err != nil {
 		return err
 	}
-	seat, ok := room.Seats[seatType]
-	if !ok || seatType == SeatHost {
-		return fmt.Errorf("seat not found")
-	}
-	participant := findParticipantByID(room, seat.ParticipantID)
-	if participant == nil {
-		id, err := randomID()
-		if err != nil {
-			return err
-		}
-		participant = &Participant{
-			ID:          id,
-			PublicAlias: generateAlias(room),
-			DisplayName: generateAlias(room),
-			Seat:        seatType,
-			Connection:  "managed",
-			JoinedAt:    time.Now(),
-		}
-		room.Participants = append(room.Participants, participant)
-	}
-	participant.RealType = strings.TrimSpace(binding.RealType)
-	participant.DisplayName = strings.TrimSpace(binding.Name)
-	participant.BaseURL = strings.TrimSpace(binding.BaseURL)
-	participant.APIKey = strings.TrimSpace(binding.APIKey)
-	if alias := strings.TrimSpace(binding.PublicAlias); alias != "" {
-		participant.PublicAlias = alias
-	}
-	if connection := strings.TrimSpace(binding.Connection); connection != "" {
-		participant.Connection = connection
-	}
-	if participant.DisplayName == "" {
-		participant.DisplayName = participant.PublicAlias
-	}
-	participant.Seat = seatType
-	syncSeats(room)
-	room.UpdatedAt = time.Now()
-	return a.saveLocked()
+	return a.bindSeatLocked(room, seatType, binding)
 }
 
 func (a *Arena) AssignSeat(code string, hostParticipantID string, req SeatAssignRequest) error {
@@ -1030,15 +994,20 @@ func (a *Arena) bindSeatLocked(room *ArenaRoom, seatType SeatType, binding Agent
 		return fmt.Errorf("seat not found")
 	}
 	participant := findParticipantByID(room, seat.ParticipantID)
+	if participant != nil && participant.Connection != "managed" {
+		participant.Seat = SeatSpectator
+		participant = nil
+	}
 	if participant == nil {
 		id, err := randomID()
 		if err != nil {
 			return err
 		}
+		alias := generateAlias(room)
 		participant = &Participant{
 			ID:          id,
-			PublicAlias: generateAlias(room),
-			DisplayName: generateAlias(room),
+			PublicAlias: alias,
+			DisplayName: alias,
 			Seat:        seatType,
 			Connection:  "managed",
 			JoinedAt:    time.Now(),

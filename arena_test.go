@@ -304,3 +304,76 @@ func TestArenaAdvanceOnceRequestsAgentMoveOnAgentTurn(t *testing.T) {
 		t.Fatalf("expected black seat participant to stay the same")
 	}
 }
+
+func TestAssignSeatBindingDoesNotOverwriteExistingHumanParticipant(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    "managed-room",
+		ClientToken: "host",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("host enter error = %v", err)
+	}
+	guestView, err := arena.Enter(EnterRequest{
+		RoomCode:    "managed-room",
+		ClientToken: "guest",
+		DisplayName: "真人黑方",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("guest enter error = %v", err)
+	}
+
+	if err := arena.AssignSeat(hostView.Room.Code, hostView.Participant.ID, SeatAssignRequest{
+		Seat: SeatBlackPlayer,
+		Binding: AgentBinding{
+			RealType:    AgentTypePico,
+			Name:        "托管 Pico",
+			PublicAlias: "黑雨伞",
+			Connection:  "managed",
+			BaseURL:     "http://127.0.0.1:9001",
+		},
+	}); err != nil {
+		t.Fatalf("AssignSeat() error = %v", err)
+	}
+
+	hostRoom, err := arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() error = %v", err)
+	}
+
+	var guestSeen bool
+	var managedSeen bool
+	for _, participant := range hostRoom.Participants {
+		switch participant.ID {
+		case guestView.Participant.ID:
+			guestSeen = true
+			if participant.RealType != AgentTypeHuman {
+				t.Fatalf("expected guest real type to stay human, got %q", participant.RealType)
+			}
+			if participant.Seat != SeatSpectator {
+				t.Fatalf("expected guest to be moved to spectator, got %q", participant.Seat)
+			}
+			if participant.DisplayName != "真人黑方" {
+				t.Fatalf("expected guest display name to be preserved, got %q", participant.DisplayName)
+			}
+		case hostRoom.Room.Seats[SeatBlackPlayer].ParticipantID:
+			managedSeen = true
+			if participant.RealType != AgentTypePico {
+				t.Fatalf("expected managed participant to be pico, got %q", participant.RealType)
+			}
+			if participant.Seat != SeatBlackPlayer {
+				t.Fatalf("expected managed participant to occupy black seat, got %q", participant.Seat)
+			}
+		}
+	}
+	if !guestSeen {
+		t.Fatalf("expected original guest participant to remain in room")
+	}
+	if !managedSeen {
+		t.Fatalf("expected a new managed participant to occupy black seat")
+	}
+}
