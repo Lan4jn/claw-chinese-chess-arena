@@ -17,6 +17,20 @@ type App struct {
 
 type arenaRouteHandler func(http.ResponseWriter, *http.Request, string)
 
+func writeArenaRouteError(w http.ResponseWriter, err error, defaultStatus int) {
+	if err == nil {
+		return
+	}
+
+	status := defaultStatus
+	switch err.Error() {
+	case "room not found", "match not started":
+		status = http.StatusNotFound
+	}
+
+	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
 func NewApp(store SnapshotStore) *App {
 	return &App{arena: NewArena(store)}
 }
@@ -30,6 +44,28 @@ func (a *App) routes() http.Handler {
 			"time":   time.Now().Format(time.RFC3339),
 		})
 	})))
+
+	mux.HandleFunc("/api/admin/transport", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead:
+			writeJSON(w, http.StatusOK, a.arena.TransportConfig())
+		case http.MethodPost:
+			var req struct {
+				DefaultMode TransportMode `json:"default_mode"`
+			}
+			if err := decodeJSON(r, &req); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			if err := a.arena.SetTransportDefaultMode(req.DefaultMode); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+			writeJSON(w, http.StatusOK, a.arena.TransportConfig())
+		default:
+			methodNotAllowed(w, http.MethodGet, http.MethodHead, http.MethodPost)
+		}
+	})
 
 	mux.HandleFunc("/api/arena/enter", methodHandler(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		var req EnterRequest
@@ -60,7 +96,7 @@ func (a *App) routes() http.Handler {
 			http.MethodGet: func(w http.ResponseWriter, r *http.Request, code string) {
 				view, err := a.arena.HostRoom(code, r.URL.Query().Get("token"))
 				if err != nil {
-					writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+					writeArenaRouteError(w, err, http.StatusForbidden)
 					return
 				}
 				writeJSON(w, http.StatusOK, view)
@@ -70,7 +106,7 @@ func (a *App) routes() http.Handler {
 			http.MethodGet: func(w http.ResponseWriter, r *http.Request, code string) {
 				view, err := a.arena.HostMatch(code, r.URL.Query().Get("token"))
 				if err != nil {
-					writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+					writeArenaRouteError(w, err, http.StatusForbidden)
 					return
 				}
 				writeJSON(w, http.StatusOK, view)

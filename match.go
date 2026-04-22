@@ -23,16 +23,23 @@ type PlayerConfig struct {
 }
 
 type Match struct {
-	ID          string                 `json:"id"`
-	RoomCode    string                 `json:"room_code"`
-	CreatedAt   time.Time              `json:"created_at"`
-	UpdatedAt   time.Time              `json:"updated_at"`
-	Players     map[Side]PlayerConfig  `json:"players"`
-	Aliases     map[Side]string        `json:"aliases"`
-	Participants map[Side]string       `json:"participants"`
-	State       GameState              `json:"state"`
-	IntervalMS  int                    `json:"interval_ms"`
-	Logs        []MatchLog             `json:"logs"`
+	ID                            string                     `json:"id"`
+	RoomCode                      string                     `json:"room_code"`
+	CreatedAt                     time.Time                  `json:"created_at"`
+	UpdatedAt                     time.Time                  `json:"updated_at"`
+	Players                       map[Side]PlayerConfig      `json:"players"`
+	Aliases                       map[Side]string            `json:"aliases"`
+	Participants                  map[Side]string            `json:"participants"`
+	State                         GameState                  `json:"state"`
+	IntervalMS                    int                        `json:"interval_ms"`
+	Logs                          []MatchLog                 `json:"logs"`
+	TransportMode                 TransportMode              `json:"transport_mode,omitempty"`
+	TransportActiveMode           TransportMode              `json:"transport_active_mode,omitempty"`
+	TransportState                MatchTransportState        `json:"transport_state,omitempty"`
+	TransportReason               string                     `json:"transport_reason,omitempty"`
+	TransportSince                time.Time                  `json:"transport_since,omitempty"`
+	TransportConfigVersionAtStart int                        `json:"transport_config_version_at_start,omitempty"`
+	AgentSessions                 map[Side]AgentSessionState `json:"agent_sessions,omitempty"`
 }
 
 type MatchLog struct {
@@ -53,15 +60,20 @@ func NewMatch(roomCode string, intervalMS int, players map[Side]PlayerConfig, al
 	}
 	now := time.Now()
 	match := &Match{
-		ID:          id,
-		RoomCode:    roomCode,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-		Players:     make(map[Side]PlayerConfig, len(players)),
-		Aliases:     make(map[Side]string, len(aliases)),
-		Participants: make(map[Side]string, len(participants)),
-		State:       NewGame(),
-		IntervalMS:  intervalMS,
+		ID:                  id,
+		RoomCode:            roomCode,
+		CreatedAt:           now,
+		UpdatedAt:           now,
+		Players:             make(map[Side]PlayerConfig, len(players)),
+		Aliases:             make(map[Side]string, len(aliases)),
+		Participants:        make(map[Side]string, len(participants)),
+		State:               NewGame(),
+		IntervalMS:          intervalMS,
+		TransportMode:       TransportModeHTTPSession,
+		TransportActiveMode: TransportModeHTTPSession,
+		TransportState:      MatchTransportStatePending,
+		TransportSince:      now,
+		AgentSessions:       make(map[Side]AgentSessionState),
 	}
 	for side, player := range players {
 		cp := player

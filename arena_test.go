@@ -1,9 +1,14 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestArenaEnterCreatesRoomAndAssignsHost(t *testing.T) {
@@ -434,5 +439,380 @@ func TestAssignSeatBindingDoesNotOverwriteExistingHumanParticipant(t *testing.T)
 	}
 	if !managedSeen {
 		t.Fatalf("expected a new managed participant to occupy black seat")
+	}
+}
+
+func TestArenaStartMatchCapturesCurrentTransportMode(t *testing.T) {
+	arena := NewArena(NewMemorySnapshotStore())
+	defer arena.Close()
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    "transport-room",
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("Enter(host) error = %v", err)
+	}
+	if _, err := arena.Enter(EnterRequest{
+		RoomCode:    "transport-room",
+		ClientToken: "guest-token",
+		JoinIntent:  JoinIntentPlayer,
+	}); err != nil {
+		t.Fatalf("Enter(guest) error = %v", err)
+	}
+
+	if err := arena.SetTransportDefaultMode(TransportModeWebSocket); err != nil {
+		t.Fatalf("SetTransportDefaultMode(websocket) error = %v", err)
+	}
+
+	matchView, err := arena.StartMatch(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("StartMatch() error = %v", err)
+	}
+	if matchView.TransportMode != string(TransportModeWebSocket) {
+		t.Fatalf("expected transport mode websocket, got %q", matchView.TransportMode)
+	}
+	if matchView.TransportActiveMode != string(TransportModeWebSocket) {
+		t.Fatalf("expected active transport mode websocket, got %q", matchView.TransportActiveMode)
+	}
+	if matchView.TransportState != string(MatchTransportStatePending) && matchView.TransportState != string(MatchTransportStateActive) {
+		t.Fatalf("expected transport state pending or active, got %q", matchView.TransportState)
+	}
+}
+
+func TestArenaTransportSwitchDoesNotRewriteActiveMatch(t *testing.T) {
+	arena := NewArena(NewMemorySnapshotStore())
+	defer arena.Close()
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    "transport-switch-room",
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("Enter(host) error = %v", err)
+	}
+	if _, err := arena.Enter(EnterRequest{
+		RoomCode:    "transport-switch-room",
+		ClientToken: "guest-token",
+		JoinIntent:  JoinIntentPlayer,
+	}); err != nil {
+		t.Fatalf("Enter(guest) error = %v", err)
+	}
+
+	if _, err := arena.StartMatch(hostView.Room.Code, hostView.Participant.ID); err != nil {
+		t.Fatalf("StartMatch() error = %v", err)
+	}
+	if err := arena.SetTransportDefaultMode(TransportModeWebSocket); err != nil {
+		t.Fatalf("SetTransportDefaultMode(websocket) error = %v", err)
+	}
+
+	hostMatch, err := arena.HostMatch(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostMatch() error = %v", err)
+	}
+	if hostMatch.TransportMode != string(TransportModeHTTPSession) {
+		t.Fatalf("expected running match to keep http_session, got %q", hostMatch.TransportMode)
+	}
+	if hostMatch.TransportActiveMode != string(TransportModeHTTPSession) {
+		t.Fatalf("expected active mode http_session, got %q", hostMatch.TransportActiveMode)
+	}
+}
+
+func TestArenaAdvanceOnceUsesHTTPSessionTransportForManagedSeat(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+	defer arena.Close()
+
+	var opened bool
+	var receivedTurn AgentTurnRequest
+	sessionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/session/open":
+			opened = true
+			writeJSON(w, http.StatusOK, map[string]any{
+				"session_id":       "sess-1",
+				"resume_token":     "resume-1",
+				"lease_ttl_ms":     30000,
+				"connection_state": "connected",
+			})
+		case "/session/turn":
+			if err := json.NewDecoder(r.Body).Decode(&receivedTurn); err != nil {
+				t.Fatalf("Decode() turn request error = %v", err)
+			}
+			writeJSON(w, http.StatusOK, AgentTurnResponse{
+				TurnID:     receivedTurn.TurnID,
+				Move:       "a3-a4",
+				Reply:      "MOVE: a3-a4",
+				AgentState: "ok",
+				SessionID:  "sess-1",
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer sessionServer.Close()
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    "http-session-room",
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("Enter(host) error = %v", err)
+	}
+	if _, err := arena.Enter(EnterRequest{
+		RoomCode:    "http-session-room",
+		ClientToken: "guest-token",
+		JoinIntent:  JoinIntentPlayer,
+	}); err != nil {
+		t.Fatalf("Enter(guest) error = %v", err)
+	}
+	if err := arena.AssignSeat(hostView.Room.Code, hostView.Participant.ID, SeatAssignRequest{
+		Seat: SeatBlackPlayer,
+		Binding: AgentBinding{
+			RealType:    AgentTypePico,
+			Name:        "托管黑方",
+			PublicAlias: "黑雨伞",
+			Connection:  "managed",
+			BaseURL:     sessionServer.URL,
+		},
+	}); err != nil {
+		t.Fatalf("AssignSeat() error = %v", err)
+	}
+	if err := arena.UpdateSettings(hostView.Room.Code, hostView.Participant.ID, RoomSettingsRequest{
+		StepIntervalMS: 1,
+	}); err != nil {
+		t.Fatalf("UpdateSettings() error = %v", err)
+	}
+	if _, err := arena.StartMatch(hostView.Room.Code, hostView.Participant.ID); err != nil {
+		t.Fatalf("StartMatch() error = %v", err)
+	}
+	if _, err := arena.SubmitMove(hostView.Room.Code, "host-token", "a6-a5"); err != nil {
+		t.Fatalf("SubmitMove() error = %v", err)
+	}
+
+	time.Sleep(3 * time.Millisecond)
+	if err := arena.AdvanceOnce(); err != nil {
+		t.Fatalf("AdvanceOnce() error = %v", err)
+	}
+
+	if !opened {
+		t.Fatalf("expected HTTP session to be opened")
+	}
+	if receivedTurn.TurnID == "" {
+		t.Fatalf("expected turn request to include turn_id")
+	}
+	if receivedTurn.MatchID == "" {
+		t.Fatalf("expected turn request to include match_id")
+	}
+	if len(receivedTurn.LegalMoves) == 0 {
+		t.Fatalf("expected turn request to include legal_moves")
+	}
+
+	matchView, err := arena.PublicMatch(hostView.Room.Code)
+	if err != nil {
+		t.Fatalf("PublicMatch() error = %v", err)
+	}
+	if matchView.LastMove != "a3-a4" {
+		t.Fatalf("expected http session move a3-a4, got %q", matchView.LastMove)
+	}
+	if matchView.TransportActiveMode != string(TransportModeHTTPSession) {
+		t.Fatalf("expected active transport mode http_session, got %q", matchView.TransportActiveMode)
+	}
+}
+
+func TestArenaAdvanceOnceUsesWebSocketTransportWhenAvailable(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+	defer arena.Close()
+
+	upgrader := websocket.Upgrader{}
+	var receivedTurn AgentTurnRequest
+	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ws" {
+			http.NotFound(w, r)
+			return
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("Upgrade() error = %v", err)
+		}
+		defer conn.Close()
+
+		if err := conn.ReadJSON(&receivedTurn); err != nil {
+			t.Fatalf("ReadJSON() error = %v", err)
+		}
+		if err := conn.WriteJSON(AgentTurnResponse{
+			TurnID:     receivedTurn.TurnID,
+			Move:       "a3-a4",
+			Reply:      "MOVE: a3-a4",
+			AgentState: "ok",
+		}); err != nil {
+			t.Fatalf("WriteJSON() error = %v", err)
+		}
+	}))
+	defer wsServer.Close()
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    "ws-room",
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("Enter(host) error = %v", err)
+	}
+	if _, err := arena.Enter(EnterRequest{
+		RoomCode:    "ws-room",
+		ClientToken: "guest-token",
+		JoinIntent:  JoinIntentPlayer,
+	}); err != nil {
+		t.Fatalf("Enter(guest) error = %v", err)
+	}
+	if err := arena.AssignSeat(hostView.Room.Code, hostView.Participant.ID, SeatAssignRequest{
+		Seat: SeatBlackPlayer,
+		Binding: AgentBinding{
+			RealType:    AgentTypePico,
+			Name:        "托管黑方",
+			PublicAlias: "黑雨伞",
+			Connection:  "managed",
+			BaseURL:     wsServer.URL,
+		},
+	}); err != nil {
+		t.Fatalf("AssignSeat() error = %v", err)
+	}
+	if err := arena.SetTransportDefaultMode(TransportModeWebSocket); err != nil {
+		t.Fatalf("SetTransportDefaultMode(websocket) error = %v", err)
+	}
+	if err := arena.UpdateSettings(hostView.Room.Code, hostView.Participant.ID, RoomSettingsRequest{
+		StepIntervalMS: 1,
+	}); err != nil {
+		t.Fatalf("UpdateSettings() error = %v", err)
+	}
+	if _, err := arena.StartMatch(hostView.Room.Code, hostView.Participant.ID); err != nil {
+		t.Fatalf("StartMatch() error = %v", err)
+	}
+	if _, err := arena.SubmitMove(hostView.Room.Code, "host-token", "a6-a5"); err != nil {
+		t.Fatalf("SubmitMove() error = %v", err)
+	}
+
+	time.Sleep(3 * time.Millisecond)
+	if err := arena.AdvanceOnce(); err != nil {
+		t.Fatalf("AdvanceOnce() error = %v", err)
+	}
+
+	matchView, err := arena.PublicMatch(hostView.Room.Code)
+	if err != nil {
+		t.Fatalf("PublicMatch() error = %v", err)
+	}
+	if receivedTurn.TurnID == "" {
+		t.Fatalf("expected websocket turn request to include turn_id")
+	}
+	if matchView.LastMove != "a3-a4" {
+		t.Fatalf("expected websocket move a3-a4, got %q", matchView.LastMove)
+	}
+	if matchView.TransportMode != string(TransportModeWebSocket) {
+		t.Fatalf("expected transport mode websocket, got %q", matchView.TransportMode)
+	}
+	if matchView.TransportActiveMode != string(TransportModeWebSocket) {
+		t.Fatalf("expected active transport mode websocket, got %q", matchView.TransportActiveMode)
+	}
+}
+
+func TestArenaAdvanceOnceDegradesWebSocketToHTTPSession(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+	defer arena.Close()
+
+	httpFallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/session/open":
+			writeJSON(w, http.StatusOK, map[string]any{
+				"session_id":       "sess-2",
+				"resume_token":     "resume-2",
+				"lease_ttl_ms":     30000,
+				"connection_state": "connected",
+			})
+		case "/session/turn":
+			var req AgentTurnRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("Decode() turn request error = %v", err)
+			}
+			writeJSON(w, http.StatusOK, AgentTurnResponse{
+				TurnID:     req.TurnID,
+				Move:       "a3-a4",
+				Reply:      "MOVE: a3-a4",
+				AgentState: "ok",
+				SessionID:  "sess-2",
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer httpFallbackServer.Close()
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    "ws-fallback-room",
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("Enter(host) error = %v", err)
+	}
+	if _, err := arena.Enter(EnterRequest{
+		RoomCode:    "ws-fallback-room",
+		ClientToken: "guest-token",
+		JoinIntent:  JoinIntentPlayer,
+	}); err != nil {
+		t.Fatalf("Enter(guest) error = %v", err)
+	}
+	if err := arena.AssignSeat(hostView.Room.Code, hostView.Participant.ID, SeatAssignRequest{
+		Seat: SeatBlackPlayer,
+		Binding: AgentBinding{
+			RealType:    AgentTypePico,
+			Name:        "托管黑方",
+			PublicAlias: "黑雨伞",
+			Connection:  "managed",
+			BaseURL:     httpFallbackServer.URL,
+		},
+	}); err != nil {
+		t.Fatalf("AssignSeat() error = %v", err)
+	}
+	if err := arena.SetTransportDefaultMode(TransportModeWebSocket); err != nil {
+		t.Fatalf("SetTransportDefaultMode(websocket) error = %v", err)
+	}
+	if err := arena.UpdateSettings(hostView.Room.Code, hostView.Participant.ID, RoomSettingsRequest{
+		StepIntervalMS: 1,
+	}); err != nil {
+		t.Fatalf("UpdateSettings() error = %v", err)
+	}
+	if _, err := arena.StartMatch(hostView.Room.Code, hostView.Participant.ID); err != nil {
+		t.Fatalf("StartMatch() error = %v", err)
+	}
+	if _, err := arena.SubmitMove(hostView.Room.Code, "host-token", "a6-a5"); err != nil {
+		t.Fatalf("SubmitMove() error = %v", err)
+	}
+
+	time.Sleep(3 * time.Millisecond)
+	if err := arena.AdvanceOnce(); err != nil {
+		t.Fatalf("AdvanceOnce() error = %v", err)
+	}
+
+	matchView, err := arena.PublicMatch(hostView.Room.Code)
+	if err != nil {
+		t.Fatalf("PublicMatch() error = %v", err)
+	}
+	if matchView.LastMove != "a3-a4" {
+		t.Fatalf("expected degraded fallback move a3-a4, got %q", matchView.LastMove)
+	}
+	if matchView.TransportMode != string(TransportModeWebSocket) {
+		t.Fatalf("expected configured transport mode websocket, got %q", matchView.TransportMode)
+	}
+	if matchView.TransportActiveMode != string(TransportModeHTTPSession) {
+		t.Fatalf("expected active mode to degrade to http_session, got %q", matchView.TransportActiveMode)
+	}
+	if matchView.TransportState != string(MatchTransportStateDegraded) && matchView.TransportState != string(MatchTransportStateActive) {
+		t.Fatalf("expected degraded or active transport state after fallback, got %q", matchView.TransportState)
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 type JoinIntent string
@@ -19,10 +21,10 @@ const (
 type SeatType string
 
 const (
-	SeatHost       SeatType = "host"
-	SeatRedPlayer  SeatType = "red_player"
+	SeatHost        SeatType = "host"
+	SeatRedPlayer   SeatType = "red_player"
 	SeatBlackPlayer SeatType = "black_player"
-	SeatSpectator  SeatType = "spectator"
+	SeatSpectator   SeatType = "spectator"
 )
 
 type RevealState string
@@ -89,8 +91,8 @@ type EnterRequest struct {
 }
 
 type ArenaEnterView struct {
-	IsHost      bool        `json:"is_host"`
-	Room        PublicRoom  `json:"room"`
+	IsHost      bool              `json:"is_host"`
+	Room        PublicRoom        `json:"room"`
 	Participant PublicParticipant `json:"participant"`
 }
 
@@ -101,14 +103,14 @@ type PublicParticipant struct {
 }
 
 type PublicRoom struct {
-	Code              string                 `json:"code"`
-	HostParticipantID string                 `json:"host_participant_id,omitempty"`
-	Status            ArenaRoomStatus        `json:"status"`
-	StepIntervalMS    int                    `json:"step_interval_ms"`
-	RevealState       RevealState            `json:"reveal_state"`
-	DefaultView       string                 `json:"default_view"`
-	Seats             map[SeatType]Seat      `json:"seats"`
-	SpectatorCount    int                    `json:"spectator_count"`
+	Code              string            `json:"code"`
+	HostParticipantID string            `json:"host_participant_id,omitempty"`
+	Status            ArenaRoomStatus   `json:"status"`
+	StepIntervalMS    int               `json:"step_interval_ms"`
+	RevealState       RevealState       `json:"reveal_state"`
+	DefaultView       string            `json:"default_view"`
+	Seats             map[SeatType]Seat `json:"seats"`
+	SpectatorCount    int               `json:"spectator_count"`
 }
 
 type HostParticipantView struct {
@@ -148,29 +150,33 @@ type SeatAssignRequest struct {
 }
 
 type AgentRegisterRequest struct {
-	ClientToken string     `json:"client_token"`
-	DisplayName string     `json:"display_name,omitempty"`
-	JoinIntent  JoinIntent `json:"join_intent"`
+	ClientToken string       `json:"client_token"`
+	DisplayName string       `json:"display_name,omitempty"`
+	JoinIntent  JoinIntent   `json:"join_intent"`
 	Binding     AgentBinding `json:"binding"`
 }
 
 type PublicMatchView struct {
-	RoomCode       string              `json:"room_code"`
-	RoomStatus     ArenaRoomStatus     `json:"room_status"`
-	StepIntervalMS int                 `json:"step_interval_ms"`
-	Turn           Side                `json:"turn"`
-	LastMove       string              `json:"last_move,omitempty"`
-	BoardRows      []string            `json:"board_rows"`
-	BoardText      string              `json:"board_text"`
-	Status         string              `json:"status"`
-	Reason         string              `json:"reason,omitempty"`
-	Winner         Side                `json:"winner,omitempty"`
-	MoveCount      int                 `json:"move_count"`
-	NextActionAt   time.Time           `json:"next_action_at,omitempty"`
-	Seats          map[SeatType]Seat   `json:"seats"`
-	Logs           []MatchLogView      `json:"logs"`
-	LegalMoves     []string            `json:"legal_moves"`
-	Phase          string              `json:"phase"`
+	RoomCode            string            `json:"room_code"`
+	RoomStatus          ArenaRoomStatus   `json:"room_status"`
+	StepIntervalMS      int               `json:"step_interval_ms"`
+	Turn                Side              `json:"turn"`
+	LastMove            string            `json:"last_move,omitempty"`
+	BoardRows           []string          `json:"board_rows"`
+	BoardText           string            `json:"board_text"`
+	Status              string            `json:"status"`
+	Reason              string            `json:"reason,omitempty"`
+	Winner              Side              `json:"winner,omitempty"`
+	MoveCount           int               `json:"move_count"`
+	NextActionAt        time.Time         `json:"next_action_at,omitempty"`
+	Seats               map[SeatType]Seat `json:"seats"`
+	Logs                []MatchLogView    `json:"logs"`
+	LegalMoves          []string          `json:"legal_moves"`
+	Phase               string            `json:"phase"`
+	TransportMode       string            `json:"transport_mode,omitempty"`
+	TransportActiveMode string            `json:"transport_active_mode,omitempty"`
+	TransportState      string            `json:"transport_state,omitempty"`
+	TransportReason     string            `json:"transport_reason,omitempty"`
 }
 
 type MatchLogView struct {
@@ -187,18 +193,23 @@ type HostMatchView struct {
 }
 
 type Arena struct {
-	mu          sync.Mutex
-	store       SnapshotStore
-	rooms       map[string]*ArenaRoom
-	requestMove func(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error)
-	ticker      *time.Ticker
-	done        chan struct{}
+	mu              sync.Mutex
+	store           SnapshotStore
+	rooms           map[string]*ArenaRoom
+	transportConfig ServiceTransportConfig
+	wsMu            sync.Mutex
+	wsConns         map[string]*websocket.Conn
+	requestMove     func(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error)
+	ticker          *time.Ticker
+	done            chan struct{}
 }
 
 func NewArena(store SnapshotStore) *Arena {
 	a := &Arena{
-		store: store,
-		rooms: make(map[string]*ArenaRoom),
+		store:           store,
+		rooms:           make(map[string]*ArenaRoom),
+		transportConfig: defaultServiceTransportConfig(),
+		wsConns:         make(map[string]*websocket.Conn),
 		requestMove: func(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
@@ -209,6 +220,10 @@ func NewArena(store SnapshotStore) *Arena {
 	}
 	if store != nil {
 		if snapshot, err := store.Load(); err == nil && snapshot != nil {
+			if snapshot.ServiceTransport.DefaultMode == "" {
+				snapshot.ServiceTransport = defaultServiceTransportConfig()
+			}
+			a.transportConfig = snapshot.ServiceTransport
 			for _, room := range snapshot.Rooms {
 				a.rooms[room.Code] = room
 			}
@@ -221,6 +236,7 @@ func NewArena(store SnapshotStore) *Arena {
 func (a *Arena) Close() {
 	close(a.done)
 	a.ticker.Stop()
+	a.closeAllWebSocketConns()
 }
 
 func (a *Arena) Enter(req EnterRequest) (ArenaEnterView, error) {
@@ -583,6 +599,11 @@ func (a *Arena) StartMatch(code string, hostParticipantID string) (PublicMatchVi
 	if err != nil {
 		return PublicMatchView{}, err
 	}
+	match.TransportMode = a.transportConfig.DefaultMode
+	match.TransportActiveMode = a.transportConfig.DefaultMode
+	match.TransportState = MatchTransportStatePending
+	match.TransportConfigVersionAtStart = a.transportConfig.ConfigVersion
+	match.TransportSince = time.Now()
 	room.ActiveMatch = match
 	room.Status = RoomStatusPlaying
 	scheduleNextAction(room)
@@ -591,6 +612,32 @@ func (a *Arena) StartMatch(code string, hostParticipantID string) (PublicMatchVi
 		return PublicMatchView{}, err
 	}
 	return buildPublicMatchView(room), nil
+}
+
+func (a *Arena) SetTransportDefaultMode(mode TransportMode) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	switch mode {
+	case TransportModeHTTPSession, TransportModeWebSocket:
+	default:
+		return fmt.Errorf("unsupported transport mode")
+	}
+
+	if a.transportConfig.DefaultMode == mode {
+		return nil
+	}
+
+	a.transportConfig.DefaultMode = mode
+	a.transportConfig.ConfigVersion++
+	a.transportConfig.UpdatedAt = time.Now()
+	return a.saveLocked()
+}
+
+func (a *Arena) TransportConfig() TransportConfigView {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return buildTransportConfigView(a.transportConfig)
 }
 
 func (a *Arena) PublicMatch(code string) (PublicMatchView, error) {
@@ -699,7 +746,8 @@ func (a *Arena) saveLocked() error {
 		return nil
 	}
 	snapshot := &ArenaSnapshot{
-		Rooms: make([]*ArenaRoom, 0, len(a.rooms)),
+		ServiceTransport: a.transportConfig,
+		Rooms:            make([]*ArenaRoom, 0, len(a.rooms)),
 	}
 	for _, room := range a.rooms {
 		snapshot.Rooms = append(snapshot.Rooms, room)
@@ -819,22 +867,26 @@ func buildPublicMatchView(room *ArenaRoom) PublicMatchView {
 		seats[seatType] = *seat
 	}
 	return PublicMatchView{
-		RoomCode:       room.Code,
-		RoomStatus:     room.Status,
-		StepIntervalMS: room.StepIntervalMS,
-		Turn:           match.State.Side,
-		LastMove:       match.State.LastMove,
-		BoardRows:      BoardRows(match.State.Board),
-		BoardText:      BoardText(match.State.Board),
-		Status:         match.State.Status,
-		Reason:         match.State.Reason,
-		Winner:         match.State.Winner,
-		MoveCount:      match.State.MoveCount,
-		NextActionAt:   room.NextActionAt,
-		Seats:          seats,
-		Logs:           buildLogViews(match.Logs, false),
-		LegalMoves:     match.LegalMoves(),
-		Phase:          matchPhase(room),
+		RoomCode:            room.Code,
+		RoomStatus:          room.Status,
+		StepIntervalMS:      room.StepIntervalMS,
+		Turn:                match.State.Side,
+		LastMove:            match.State.LastMove,
+		BoardRows:           BoardRows(match.State.Board),
+		BoardText:           BoardText(match.State.Board),
+		Status:              match.State.Status,
+		Reason:              match.State.Reason,
+		Winner:              match.State.Winner,
+		MoveCount:           match.State.MoveCount,
+		NextActionAt:        room.NextActionAt,
+		Seats:               seats,
+		Logs:                buildLogViews(match.Logs, false),
+		LegalMoves:          match.LegalMoves(),
+		Phase:               matchPhase(room),
+		TransportMode:       string(match.TransportMode),
+		TransportActiveMode: string(match.TransportActiveMode),
+		TransportState:      string(match.TransportState),
+		TransportReason:     match.TransportReason,
 	}
 }
 
@@ -877,9 +929,61 @@ func (a *Arena) advanceRoom(code string) error {
 	legal := match.LegalMoves()
 	side := state.Side
 	matchID := match.ID
+	transportMode := match.TransportActiveMode
 	a.mu.Unlock()
 
-	move, reply, err := a.requestMove(matchID, player, state, legal, arenaState)
+	var move, reply string
+	var err error
+	var degraded bool
+	var transportReason string
+
+	switch transportMode {
+	case TransportModeHTTPSession:
+		if strings.TrimSpace(player.BaseURL) == "" {
+			move, reply, err = a.requestMove(matchID, player, state, legal, arenaState)
+		} else {
+			var resp AgentTurnResponse
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			resp, err = deliverHTTPSessionTurn(ctx, defaultHTTPClient(), match, room, player, arenaState)
+			cancel()
+			move = resp.Move
+			reply = resp.Reply
+			if err == nil && resp.TurnID != buildTurnID(match) {
+				err = fmt.Errorf("agent response turn_id mismatch")
+			}
+		}
+	case TransportModeWebSocket:
+		if strings.TrimSpace(player.BaseURL) == "" {
+			move, reply, err = a.requestMove(matchID, player, state, legal, arenaState)
+			break
+		}
+		var resp AgentTurnResponse
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		resp, err = a.deliverWebSocketTurn(ctx, match, room, player, arenaState)
+		cancel()
+		if err == nil && resp.TurnID != buildTurnID(match) {
+			err = fmt.Errorf("agent response turn_id mismatch")
+		}
+		if err == nil {
+			move = resp.Move
+			reply = resp.Reply
+			break
+		}
+
+		transportReason = err.Error()
+		resp, err = deliverHTTPSessionTurn(context.Background(), defaultHTTPClient(), match, room, player, arenaState)
+		if err == nil && resp.TurnID != buildTurnID(match) {
+			err = fmt.Errorf("agent response turn_id mismatch")
+		}
+		if err == nil {
+			move = resp.Move
+			reply = resp.Reply
+			degraded = true
+			break
+		}
+	default:
+		move, reply, err = a.requestMove(matchID, player, state, legal, arenaState)
+	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -892,14 +996,28 @@ func (a *Arena) advanceRoom(code string) error {
 		match.AppendAgentError(side, reply, err)
 		room.Status = RoomStatusPaused
 		room.NextActionAt = time.Time{}
+		match.TransportState = MatchTransportStateFailed
+		match.TransportReason = err.Error()
 		room.UpdatedAt = time.Now()
 		return a.saveLocked()
 	}
 	if err := match.ApplyAgentMove(side, move, reply); err != nil {
 		room.Status = RoomStatusPaused
 		room.NextActionAt = time.Time{}
+		match.TransportState = MatchTransportStateFailed
+		match.TransportReason = err.Error()
 		room.UpdatedAt = time.Now()
 		return a.saveLocked()
+	}
+	if degraded {
+		match.TransportActiveMode = TransportModeHTTPSession
+		match.TransportState = MatchTransportStateDegraded
+		match.TransportReason = transportReason
+		match.TransportSince = time.Now()
+		match.appendLog(MatchLog{Time: time.Now(), Side: side, Message: "WebSocket 已降级为 HTTP session", Error: transportReason})
+	} else {
+		match.TransportState = MatchTransportStateActive
+		match.TransportReason = ""
 	}
 	if match.State.Status == "finished" {
 		room.Status = RoomStatusFinished

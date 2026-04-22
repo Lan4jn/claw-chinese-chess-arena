@@ -13,7 +13,8 @@ type SnapshotStore interface {
 }
 
 type ArenaSnapshot struct {
-	Rooms []*ArenaRoom `json:"rooms"`
+	ServiceTransport ServiceTransportConfig `json:"service_transport"`
+	Rooms            []*ArenaRoom           `json:"rooms"`
 }
 
 type MemorySnapshotStore struct {
