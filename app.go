@@ -15,6 +15,8 @@ type App struct {
 	arena *Arena
 }
 
+type arenaRouteHandler func(http.ResponseWriter, *http.Request, string)
+
 func NewApp(store SnapshotStore) *App {
 	return &App{arena: NewArena(store)}
 }
@@ -43,60 +45,49 @@ func (a *App) routes() http.Handler {
 		writeJSON(w, http.StatusOK, view)
 	}))
 
-	mux.HandleFunc("/api/arena/", func(w http.ResponseWriter, r *http.Request) {
-		code, tail, ok := arenaRouteParts(r.URL.Path)
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-
-		allowedMethods := arenaAllowedMethods(tail)
-		if len(allowedMethods) == 0 {
-			http.NotFound(w, r)
-			return
-		}
-		if !methodAllowed(r.Method, allowedMethods) {
-			methodNotAllowed(w, allowedMethods...)
-			return
-		}
-
-		switch methodForDispatch(r.Method) {
-		case http.MethodGet:
-			switch tail {
-			case "":
+	arenaRoutes := map[string]map[string]arenaRouteHandler{
+		"": {
+			http.MethodGet: func(w http.ResponseWriter, r *http.Request, code string) {
 				room, err := a.arena.PublicRoom(code)
 				if err != nil {
 					writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 					return
 				}
 				writeJSON(w, http.StatusOK, room)
-			case "host":
+			},
+		},
+		"host": {
+			http.MethodGet: func(w http.ResponseWriter, r *http.Request, code string) {
 				view, err := a.arena.HostRoom(code, r.URL.Query().Get("token"))
 				if err != nil {
 					writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 					return
 				}
 				writeJSON(w, http.StatusOK, view)
-			case "host/match":
+			},
+		},
+		"host/match": {
+			http.MethodGet: func(w http.ResponseWriter, r *http.Request, code string) {
 				view, err := a.arena.HostMatch(code, r.URL.Query().Get("token"))
 				if err != nil {
 					writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 					return
 				}
 				writeJSON(w, http.StatusOK, view)
-			case "match":
+			},
+		},
+		"match": {
+			http.MethodGet: func(w http.ResponseWriter, r *http.Request, code string) {
 				match, err := a.arena.PublicMatch(code)
 				if err != nil {
 					writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 					return
 				}
 				writeJSON(w, http.StatusOK, match)
-			default:
-				http.NotFound(w, r)
-			}
-		case http.MethodPost:
-			switch tail {
-			case "match/start":
+			},
+		},
+		"match/start": {
+			http.MethodPost: func(w http.ResponseWriter, r *http.Request, code string) {
 				var req struct {
 					HostToken string `json:"host_token"`
 				}
@@ -110,7 +101,10 @@ func (a *App) routes() http.Handler {
 					return
 				}
 				writeJSON(w, http.StatusOK, view)
-			case "match/pause":
+			},
+		},
+		"match/pause": {
+			http.MethodPost: func(w http.ResponseWriter, r *http.Request, code string) {
 				var req struct {
 					HostToken string `json:"host_token"`
 				}
@@ -124,7 +118,10 @@ func (a *App) routes() http.Handler {
 					return
 				}
 				writeJSON(w, http.StatusOK, view)
-			case "match/resume":
+			},
+		},
+		"match/resume": {
+			http.MethodPost: func(w http.ResponseWriter, r *http.Request, code string) {
 				var req struct {
 					HostToken string `json:"host_token"`
 				}
@@ -138,7 +135,10 @@ func (a *App) routes() http.Handler {
 					return
 				}
 				writeJSON(w, http.StatusOK, view)
-			case "match/reset":
+			},
+		},
+		"match/reset": {
+			http.MethodPost: func(w http.ResponseWriter, r *http.Request, code string) {
 				var req struct {
 					HostToken string `json:"host_token"`
 				}
@@ -152,7 +152,10 @@ func (a *App) routes() http.Handler {
 					return
 				}
 				writeJSON(w, http.StatusOK, view)
-			case "move":
+			},
+		},
+		"move": {
+			http.MethodPost: func(w http.ResponseWriter, r *http.Request, code string) {
 				var req struct {
 					ClientToken string `json:"client_token"`
 					Move        string `json:"move"`
@@ -167,7 +170,10 @@ func (a *App) routes() http.Handler {
 					return
 				}
 				writeJSON(w, http.StatusOK, view)
-			case "settings":
+			},
+		},
+		"settings": {
+			http.MethodPost: func(w http.ResponseWriter, r *http.Request, code string) {
 				var req struct {
 					HostToken string `json:"host_token"`
 					RoomSettingsRequest
@@ -186,7 +192,10 @@ func (a *App) routes() http.Handler {
 					return
 				}
 				writeJSON(w, http.StatusOK, room)
-			case "seats/assign":
+			},
+		},
+		"seats/assign": {
+			http.MethodPost: func(w http.ResponseWriter, r *http.Request, code string) {
 				var req struct {
 					HostToken string `json:"host_token"`
 					SeatAssignRequest
@@ -205,7 +214,10 @@ func (a *App) routes() http.Handler {
 					return
 				}
 				writeJSON(w, http.StatusOK, room)
-			case "seats/remove":
+			},
+		},
+		"seats/remove": {
+			http.MethodPost: func(w http.ResponseWriter, r *http.Request, code string) {
 				var req struct {
 					HostToken string   `json:"host_token"`
 					Seat      SeatType `json:"seat"`
@@ -224,7 +236,10 @@ func (a *App) routes() http.Handler {
 					return
 				}
 				writeJSON(w, http.StatusOK, room)
-			case "reveal":
+			},
+		},
+		"reveal": {
+			http.MethodPost: func(w http.ResponseWriter, r *http.Request, code string) {
 				var req struct {
 					HostToken string `json:"host_token"`
 					Scope     string `json:"scope"`
@@ -243,7 +258,10 @@ func (a *App) routes() http.Handler {
 					return
 				}
 				writeJSON(w, http.StatusOK, room)
-			case "agent/register":
+			},
+		},
+		"agent/register": {
+			http.MethodPost: func(w http.ResponseWriter, r *http.Request, code string) {
 				var req AgentRegisterRequest
 				if err := decodeJSON(r, &req); err != nil {
 					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -255,7 +273,10 @@ func (a *App) routes() http.Handler {
 					return
 				}
 				writeJSON(w, http.StatusOK, view)
-			case "agent/act":
+			},
+		},
+		"agent/act": {
+			http.MethodPost: func(w http.ResponseWriter, r *http.Request, code string) {
 				var req struct {
 					ClientToken string `json:"client_token"`
 					Move        string `json:"move"`
@@ -270,10 +291,31 @@ func (a *App) routes() http.Handler {
 					return
 				}
 				writeJSON(w, http.StatusOK, view)
-			default:
-				http.NotFound(w, r)
-			}
+			},
+		},
+	}
+
+	mux.HandleFunc("/api/arena/", func(w http.ResponseWriter, r *http.Request) {
+		code, tail, ok := arenaRouteParts(r.URL.Path)
+		if !ok {
+			http.NotFound(w, r)
+			return
 		}
+
+		routesByMethod, ok := arenaRoutes[tail]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+
+		method := methodForDispatch(r.Method)
+		handler, ok := routesByMethod[method]
+		if !ok {
+			allowedMethods := arenaRouteAllowMethods(routesByMethod)
+			methodNotAllowed(w, allowedMethods...)
+			return
+		}
+		handler(w, r, code)
 	})
 
 	fileServer := http.FileServer(http.Dir("static"))
@@ -310,15 +352,6 @@ func methodNotAllowed(w http.ResponseWriter, methods ...string) {
 	http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 }
 
-func methodAllowed(method string, allowed []string) bool {
-	for _, m := range allowed {
-		if method == m {
-			return true
-		}
-	}
-	return false
-}
-
 func methodForDispatch(method string) string {
 	if method == http.MethodHead {
 		return http.MethodGet
@@ -326,16 +359,24 @@ func methodForDispatch(method string) string {
 	return method
 }
 
-func arenaAllowedMethods(tail string) []string {
-	switch tail {
-	case "", "host", "host/match", "match":
-		return []string{http.MethodGet, http.MethodHead}
-	case "match/start", "match/pause", "match/resume", "match/reset",
-		"move", "settings", "seats/assign", "seats/remove", "reveal", "agent/register", "agent/act":
-		return []string{http.MethodPost}
-	default:
-		return nil
+func arenaRouteAllowMethods(routesByMethod map[string]arenaRouteHandler) []string {
+	allowed := make([]string, 0, 2)
+	if _, ok := routesByMethod[http.MethodGet]; ok {
+		allowed = append(allowed, http.MethodGet, http.MethodHead)
 	}
+	if _, ok := routesByMethod[http.MethodPost]; ok {
+		allowed = append(allowed, http.MethodPost)
+	}
+	if _, ok := routesByMethod[http.MethodPut]; ok {
+		allowed = append(allowed, http.MethodPut)
+	}
+	if _, ok := routesByMethod[http.MethodPatch]; ok {
+		allowed = append(allowed, http.MethodPatch)
+	}
+	if _, ok := routesByMethod[http.MethodDelete]; ok {
+		allowed = append(allowed, http.MethodDelete)
+	}
+	return allowed
 }
 
 func arenaRouteParts(path string) (string, string, bool) {
