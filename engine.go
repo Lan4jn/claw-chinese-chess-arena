@@ -401,6 +401,23 @@ func BoardText(b Board) string {
 	return sb.String()
 }
 
+func BoardRows(b Board) []string {
+	rows := make([]string, 0, len(b))
+	for y := 0; y < 10; y++ {
+		var sb strings.Builder
+		for x := 0; x < 9; x++ {
+			p := b[y][x]
+			if p == 0 {
+				sb.WriteByte('.')
+				continue
+			}
+			sb.WriteByte(byte(p))
+		}
+		rows = append(rows, sb.String())
+	}
+	return rows
+}
+
 func inBoard(x, y int) bool {
 	return x >= 0 && x < 9 && y >= 0 && y < 10
 }

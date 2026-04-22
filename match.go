@@ -1,25 +1,38 @@
 package main
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"net/http"
 	"strings"
-	"sync"
 	"time"
 )
 
+const (
+	AgentTypeHuman  = "human"
+	AgentTypePico   = "pico"
+	AgentTypeClaw   = "claw"
+	AgentTypeCustom = "custom_agent"
+)
+
+type PlayerConfig struct {
+	Type    string `json:"type"`
+	Name    string `json:"name"`
+	BaseURL string `json:"base_url,omitempty"`
+	APIKey  string `json:"api_key,omitempty"`
+}
+
 type Match struct {
-	ID        string                 `json:"id"`
-	CreatedAt time.Time              `json:"created_at"`
-	UpdatedAt time.Time              `json:"updated_at"`
-	Players   map[Side]PlayerConfig  `json:"players"`
-	State     GameState              `json:"state"`
-	Auto      bool                   `json:"auto"`
-	Interval  int                    `json:"interval_ms"`
-	Logs      []MatchLog             `json:"logs"`
+	ID          string                 `json:"id"`
+	RoomCode    string                 `json:"room_code"`
+	CreatedAt   time.Time              `json:"created_at"`
+	UpdatedAt   time.Time              `json:"updated_at"`
+	Players     map[Side]PlayerConfig  `json:"players"`
+	Aliases     map[Side]string        `json:"aliases"`
+	Participants map[Side]string       `json:"participants"`
+	State       GameState              `json:"state"`
+	IntervalMS  int                    `json:"interval_ms"`
+	Logs        []MatchLog             `json:"logs"`
 }
 
 type MatchLog struct {
@@ -30,207 +43,118 @@ type MatchLog struct {
 	Error   string    `json:"error,omitempty"`
 }
 
-type CreateMatchRequest struct {
-	Red        PlayerConfig `json:"red"`
-	Black      PlayerConfig `json:"black"`
-	Auto       bool         `json:"auto"`
-	IntervalMS int          `json:"interval_ms"`
-}
-
-type ManualMoveRequest struct {
-	Move string `json:"move"`
-}
-
-type AutoRequest struct {
-	Enabled    bool `json:"enabled"`
-	IntervalMS int  `json:"interval_ms"`
-}
-
-type Manager struct {
-	mu      sync.Mutex
-	matches map[string]*Match
-	client  *http.Client
-}
-
-func NewManager() *Manager {
-	return &Manager{
-		matches: make(map[string]*Match),
-		client:  defaultHTTPClient(),
-	}
-}
-
-func (m *Manager) Create(req CreateMatchRequest) (*Match, error) {
-	normalizePlayer(&req.Red, "本地 Pico", "pico")
-	normalizePlayer(&req.Black, "130 Pico", "pico")
-	if req.IntervalMS <= 0 {
-		req.IntervalMS = 3000
-	}
+func NewMatch(roomCode string, intervalMS int, players map[Side]PlayerConfig, aliases map[Side]string, participants map[Side]string) (*Match, error) {
 	id, err := randomID()
 	if err != nil {
 		return nil, err
 	}
+	if intervalMS <= 0 {
+		intervalMS = 3000
+	}
 	now := time.Now()
 	match := &Match{
-		ID:        id,
-		CreatedAt: now,
-		UpdatedAt: now,
-		Players: map[Side]PlayerConfig{
-			SideRed:   req.Red,
-			SideBlack: req.Black,
-		},
-		State:    NewGame(),
-		Auto:     req.Auto,
-		Interval: req.IntervalMS,
+		ID:          id,
+		RoomCode:    roomCode,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		Players:     make(map[Side]PlayerConfig, len(players)),
+		Aliases:     make(map[Side]string, len(aliases)),
+		Participants: make(map[Side]string, len(participants)),
+		State:       NewGame(),
+		IntervalMS:  intervalMS,
 	}
-	match.Logs = append(match.Logs, MatchLog{Time: now, Message: "对局已创建"})
-	m.mu.Lock()
-	m.matches[id] = match
-	m.mu.Unlock()
-	if req.Auto {
-		go m.autoplay(id)
+	for side, player := range players {
+		cp := player
+		normalizePlayer(&cp, defaultPlayerName(side), AgentTypeHuman)
+		match.Players[side] = cp
 	}
+	for side, alias := range aliases {
+		match.Aliases[side] = strings.TrimSpace(alias)
+	}
+	for side, participantID := range participants {
+		match.Participants[side] = participantID
+	}
+	match.appendLog(MatchLog{Time: now, Message: "比赛已创建"})
 	return match, nil
 }
 
-func (m *Manager) List() []*Match {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make([]*Match, 0, len(m.matches))
-	for _, match := range m.matches {
-		out = append(out, cloneMatch(match))
+func (m *Match) ApplyHumanMove(side Side, move string) error {
+	if m.State.Status != "playing" {
+		return fmt.Errorf("match is not playing")
 	}
-	return out
-}
-
-func (m *Manager) Get(id string) (*Match, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	match, ok := m.matches[id]
-	if !ok {
-		return nil, false
+	if m.State.Side != side {
+		return fmt.Errorf("it is not %s's turn", side)
 	}
-	return cloneMatch(match), true
-}
-
-func (m *Manager) ManualMove(id string, move string) (*Match, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	match, ok := m.matches[id]
-	if !ok {
-		return nil, fmt.Errorf("match not found")
+	move = strings.TrimSpace(move)
+	if err := m.State.Apply(move); err != nil {
+		now := time.Now()
+		m.UpdatedAt = now
+		m.appendLog(MatchLog{Time: now, Side: side, Message: "手动走子失败", Error: err.Error()})
+		return err
 	}
-	if err := match.State.Apply(strings.TrimSpace(move)); err != nil {
-		match.appendLog(MatchLog{Time: time.Now(), Side: match.State.Side, Message: "手动走子失败", Error: err.Error()})
-		return cloneMatch(match), err
-	}
-	match.UpdatedAt = time.Now()
-	match.appendLog(MatchLog{Time: time.Now(), Message: "手动走子：" + match.State.LastMove})
-	return cloneMatch(match), nil
-}
-
-func (m *Manager) Step(ctx context.Context, id string) (*Match, error) {
-	m.mu.Lock()
-	match, ok := m.matches[id]
-	if !ok {
-		m.mu.Unlock()
-		return nil, fmt.Errorf("match not found")
-	}
-	if match.State.Status != "playing" {
-		m.mu.Unlock()
-		return cloneMatch(match), nil
-	}
-	side := match.State.Side
-	player := match.Players[side]
-	if strings.EqualFold(player.Type, "human") {
-		m.mu.Unlock()
-		return cloneMatch(match), fmt.Errorf("%s is human, use manual move", side)
-	}
-	state := match.State
-	legal := state.LegalMoveStrings()
-	m.mu.Unlock()
-
-	move, reply, err := askPicoForMove(ctx, m.client, id, player, state, legal)
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	match = m.matches[id]
 	now := time.Now()
-	if err != nil {
-		match.appendLog(MatchLog{Time: now, Side: side, Message: "请求 Pico 走子失败", Reply: reply, Error: err.Error()})
-		match.UpdatedAt = now
-		return cloneMatch(match), err
-	}
-	if err := match.State.Apply(move); err != nil {
-		match.appendLog(MatchLog{Time: now, Side: side, Message: "Pico 返回非法走法："+move, Reply: reply, Error: err.Error()})
-		match.UpdatedAt = now
-		return cloneMatch(match), err
-	}
-	match.appendLog(MatchLog{Time: now, Side: side, Message: "Pico 走子：" + move, Reply: reply})
-	match.UpdatedAt = now
-	return cloneMatch(match), nil
+	m.UpdatedAt = now
+	m.appendLog(MatchLog{Time: now, Side: side, Message: "手动走子：" + m.State.LastMove})
+	return nil
 }
 
-func (m *Manager) SetAuto(id string, req AutoRequest) (*Match, error) {
-	m.mu.Lock()
-	match, ok := m.matches[id]
-	if !ok {
-		m.mu.Unlock()
-		return nil, fmt.Errorf("match not found")
+func (m *Match) ApplyAgentMove(side Side, move string, reply string) error {
+	if m.State.Status != "playing" {
+		return fmt.Errorf("match is not playing")
 	}
-	if req.IntervalMS <= 0 {
-		req.IntervalMS = match.Interval
+	if m.State.Side != side {
+		return fmt.Errorf("it is not %s's turn", side)
 	}
-	wasAuto := match.Auto
-	match.Auto = req.Enabled
-	match.Interval = req.IntervalMS
-	match.UpdatedAt = time.Now()
-	out := cloneMatch(match)
-	m.mu.Unlock()
-	if req.Enabled && !wasAuto {
-		go m.autoplay(id)
+	move = strings.TrimSpace(move)
+	if err := m.State.Apply(move); err != nil {
+		now := time.Now()
+		m.UpdatedAt = now
+		m.appendLog(MatchLog{Time: now, Side: side, Message: "选手返回非法走法：" + move, Reply: reply, Error: err.Error()})
+		return err
 	}
-	return out, nil
+	now := time.Now()
+	m.UpdatedAt = now
+	m.appendLog(MatchLog{Time: now, Side: side, Message: "选手走子：" + m.State.LastMove, Reply: reply})
+	return nil
 }
 
-func (m *Manager) autoplay(id string) {
-	for {
-		m.mu.Lock()
-		match, ok := m.matches[id]
-		if !ok || !match.Auto || match.State.Status != "playing" {
-			m.mu.Unlock()
-			return
-		}
-		interval := time.Duration(match.Interval) * time.Millisecond
-		if interval <= 0 {
-			interval = 3 * time.Second
-		}
-		m.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		_, _ = m.Step(ctx, id)
-		cancel()
-		time.Sleep(interval)
+func (m *Match) AppendAgentError(side Side, reply string, err error) {
+	if err == nil {
+		return
 	}
+	now := time.Now()
+	m.UpdatedAt = now
+	m.appendLog(MatchLog{Time: now, Side: side, Message: "请求选手走子失败", Reply: reply, Error: err.Error()})
+}
+
+func (m *Match) CurrentPlayer() PlayerConfig {
+	return m.Players[m.State.Side]
+}
+
+func (m *Match) CurrentParticipantID() string {
+	return m.Participants[m.State.Side]
+}
+
+func (m *Match) CurrentAlias() string {
+	return m.Aliases[m.State.Side]
+}
+
+func (m *Match) OpponentAlias() string {
+	return m.Aliases[opposite(m.State.Side)]
+}
+
+func (m *Match) LegalMoves() []string {
+	if m.State.Status != "playing" {
+		return nil
+	}
+	return m.State.LegalMoveStrings()
 }
 
 func (m *Match) appendLog(log MatchLog) {
 	m.Logs = append(m.Logs, log)
-	if len(m.Logs) > 80 {
-		m.Logs = m.Logs[len(m.Logs)-80:]
+	if len(m.Logs) > 120 {
+		m.Logs = m.Logs[len(m.Logs)-120:]
 	}
-}
-
-func cloneMatch(match *Match) *Match {
-	cp := *match
-	cp.Players = make(map[Side]PlayerConfig, len(match.Players))
-	for k, v := range match.Players {
-		if v.APIKey != "" {
-			v.APIKey = "已设置"
-		}
-		cp.Players[k] = v
-	}
-	cp.State.History = append([]MoveRecord(nil), match.State.History...)
-	cp.Logs = append([]MatchLog(nil), match.Logs...)
-	return &cp
 }
 
 func normalizePlayer(p *PlayerConfig, fallbackName, fallbackType string) {
@@ -244,6 +168,13 @@ func normalizePlayer(p *PlayerConfig, fallbackName, fallbackType string) {
 	}
 	p.BaseURL = strings.TrimSpace(p.BaseURL)
 	p.APIKey = strings.TrimSpace(p.APIKey)
+}
+
+func defaultPlayerName(side Side) string {
+	if side == SideRed {
+		return "红方选手"
+	}
+	return "黑方选手"
 }
 
 func randomID() (string, error) {

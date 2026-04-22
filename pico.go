@@ -13,13 +13,6 @@ import (
 	"time"
 )
 
-type PlayerConfig struct {
-	Type    string `json:"type"`
-	Name    string `json:"name"`
-	BaseURL string `json:"base_url,omitempty"`
-	APIKey  string `json:"api_key,omitempty"`
-}
-
 type picoMessageRequest struct {
 	SessionID         string `json:"session_id,omitempty"`
 	SenderID          string `json:"sender_id,omitempty"`
@@ -33,9 +26,15 @@ type picoMessageResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
+type PromptArenaState struct {
+	RoomCode       string
+	StepIntervalMS int
+	OpponentAlias  string
+}
+
 var movePattern = regexp.MustCompile(`[a-i][0-9]-[a-i][0-9]`)
 
-func askPicoForMove(ctx context.Context, client *http.Client, matchID string, player PlayerConfig, state GameState, legal []string) (string, string, error) {
+func askPicoForMove(ctx context.Context, client *http.Client, matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
 	if strings.TrimSpace(player.BaseURL) == "" {
 		return "", "", fmt.Errorf("%s has no base_url", player.Name)
 	}
@@ -43,7 +42,7 @@ func askPicoForMove(ctx context.Context, client *http.Client, matchID string, pl
 	if err != nil {
 		return "", "", err
 	}
-	prompt := buildMovePrompt(matchID, player, state, legal)
+	prompt := buildMovePrompt(matchID, player, state, legal, arenaState)
 	payload := picoMessageRequest{
 		SessionID:         "xiangqi-" + matchID,
 		SenderID:          "pico-xiangqi-arena",
@@ -89,13 +88,17 @@ func askPicoForMove(ctx context.Context, client *http.Client, matchID string, pl
 	return move, decoded.Reply, nil
 }
 
-func buildMovePrompt(matchID string, player PlayerConfig, state GameState, legal []string) string {
+func buildMovePrompt(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) string {
 	sideName := "红方"
 	if state.Side == SideBlack {
 		sideName = "黑方"
 	}
 	return fmt.Sprintf(`你正在参加一场中国象棋对局，比赛 ID：%s。
+比赛场地：%s。
 你是：%s（%s）。
+步间隔：%dms。
+对手公开身份：%s。
+对手真实身份未知。
 
 棋盘坐标固定为：左到右 a-i，上到下 0-9。红方在下方，黑方在上方。
 棋子用英文缩写：K/k 将帅，A/a 士，B/b 象相，N/n 马，R/r 车，C/c 炮，P/p 兵卒；大写是红方，小写是黑方。
@@ -107,7 +110,7 @@ func buildMovePrompt(matchID string, player PlayerConfig, state GameState, legal
 
 请只给出一步棋，格式必须包含 MOVE: a0-a1，例如：
 MOVE: h9-g7
-不要执行命令，不要解释长篇推理。`, matchID, player.Name, sideName, BoardText(state.Board), strings.Join(legal, ", "))
+不要执行命令，不要解释长篇推理。`, matchID, arenaState.RoomCode, player.Name, sideName, arenaState.StepIntervalMS, arenaState.OpponentAlias, BoardText(state.Board), strings.Join(legal, ", "))
 }
 
 func extractMove(reply string, legal []string) string {

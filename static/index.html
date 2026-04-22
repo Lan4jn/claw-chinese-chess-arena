@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pico Xiangqi Arena</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app-shell" id="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <p class="eyebrow">CYBER DOUQUQU</p>
+        <h1>Pico Xiangqi Arena</h1>
+      </div>
+      <div class="topbar-meta">
+        <div class="badge-stack">
+          <span class="badge" id="room-code-badge">比赛码：未进入</span>
+          <span class="badge" id="room-status-badge">等待加入</span>
+          <span class="badge" id="interval-badge">步间隔：-</span>
+          <span class="badge" id="reveal-badge">身份：隐藏</span>
+        </div>
+        <div class="toolbar">
+          <div class="view-switch">
+            <button type="button" data-view="board" class="view-btn is-active">棋局中心</button>
+            <button type="button" data-view="commentary" class="view-btn">解说模式</button>
+          </div>
+          <button type="button" class="ghost-btn" id="future-mode-btn">游戏型入口预留</button>
+          <button type="button" class="primary-btn" id="host-drawer-toggle" hidden>比赛设置</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="arena-layout" id="arena-layout">
+      <section class="stage-column">
+        <div class="stage-card board-stage">
+          <div class="stage-header">
+            <div>
+              <p class="label">主舞台</p>
+              <h2 id="stage-title">等待创建比赛</h2>
+            </div>
+            <div class="turn-pill" id="turn-pill">未开始</div>
+          </div>
+          <div class="board-wrap">
+            <div class="board-frame">
+              <div class="board-grid" id="board-grid"></div>
+            </div>
+            <div class="board-footer">
+              <span id="selection-hint">点击比赛码进入你的比赛场地</span>
+              <button type="button" class="ghost-btn" id="clear-selection-btn">取消选中</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="stage-card event-stage">
+          <div class="stage-header">
+            <div>
+              <p class="label">赛事播报</p>
+              <h2>解说台</h2>
+            </div>
+            <label class="toggle" id="raw-log-toggle-wrap" hidden>
+              <input type="checkbox" id="raw-log-toggle">
+              <span>显示原始回复</span>
+            </label>
+          </div>
+          <div class="event-list" id="event-list"></div>
+        </div>
+      </section>
+
+      <aside class="info-column">
+        <div class="stage-card seat-card seat-red" id="seat-red-card"></div>
+        <div class="stage-card seat-card seat-black" id="seat-black-card"></div>
+        <div class="stage-card room-card">
+          <div class="stage-header compact">
+            <div>
+              <p class="label">观战席</p>
+              <h2>场地信息</h2>
+            </div>
+          </div>
+          <dl class="room-stats">
+            <div>
+              <dt>我的身份</dt>
+              <dd id="my-seat">未入场</dd>
+            </div>
+            <div>
+              <dt>我的代号</dt>
+              <dd id="my-alias">-</dd>
+            </div>
+            <div>
+              <dt>默认视图</dt>
+              <dd id="default-view">-</dd>
+            </div>
+            <div>
+              <dt>观众人数</dt>
+              <dd id="spectator-count">0</dd>
+            </div>
+          </dl>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <aside class="host-drawer" id="host-drawer" aria-hidden="true">
+    <div class="drawer-backdrop" id="drawer-backdrop"></div>
+    <div class="drawer-panel">
+      <div class="drawer-header">
+        <div>
+          <p class="eyebrow">HOST CONTROL</p>
+          <h2>比赛设置</h2>
+        </div>
+        <button type="button" class="ghost-btn" id="host-drawer-close">收起</button>
+      </div>
+
+      <div class="drawer-body">
+        <section class="drawer-section">
+          <h3>房间设置</h3>
+          <label class="field">
+            <span>步间隔（ms）</span>
+            <input type="number" id="step-interval-input" min="0" step="100">
+          </label>
+          <label class="field">
+            <span>默认观战视图</span>
+            <select id="default-view-select">
+              <option value="board">棋局中心</option>
+              <option value="commentary">解说模式</option>
+            </select>
+          </label>
+          <button type="button" class="primary-btn" id="save-settings-btn">保存房间设置</button>
+        </section>
+
+        <section class="drawer-section">
+          <div class="section-heading">
+            <h3>席位配置</h3>
+            <p>给红黑双方绑定人类或 Pico 等 agent。</p>
+          </div>
+          <div class="seat-config-grid">
+            <form class="seat-config" data-seat="red_player">
+              <h4>红方席</h4>
+              <label class="field"><span>物品代号</span><input name="public_alias" placeholder="例如：台灯"></label>
+              <label class="field">
+                <span>真实类型</span>
+                <select name="real_type">
+                  <option value="human">human</option>
+                  <option value="pico">pico</option>
+                  <option value="claw">claw</option>
+                  <option value="custom_agent">custom_agent</option>
+                </select>
+              </label>
+              <label class="field"><span>展示名</span><input name="name" placeholder="例如：本地 Pico"></label>
+              <label class="field"><span>Base URL</span><input name="base_url" placeholder="http://127.0.0.1:9000"></label>
+              <label class="field"><span>API Key</span><input name="api_key" placeholder="选填"></label>
+              <div class="seat-actions">
+                <button type="button" class="primary-btn save-seat-btn">保存红方配置</button>
+                <button type="button" class="ghost-btn remove-seat-btn">清空席位</button>
+              </div>
+            </form>
+
+            <form class="seat-config" data-seat="black_player">
+              <h4>黑方席</h4>
+              <label class="field"><span>物品代号</span><input name="public_alias" placeholder="例如：黑雨伞"></label>
+              <label class="field">
+                <span>真实类型</span>
+                <select name="real_type">
+                  <option value="human">human</option>
+                  <option value="pico">pico</option>
+                  <option value="claw">claw</option>
+                  <option value="custom_agent">custom_agent</option>
+                </select>
+              </label>
+              <label class="field"><span>展示名</span><input name="name" placeholder="例如：130 Pico"></label>
+              <label class="field"><span>Base URL</span><input name="base_url" placeholder="http://127.0.0.1:9001"></label>
+              <label class="field"><span>API Key</span><input name="api_key" placeholder="选填"></label>
+              <div class="seat-actions">
+                <button type="button" class="primary-btn save-seat-btn">保存黑方配置</button>
+                <button type="button" class="ghost-btn remove-seat-btn">清空席位</button>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <section class="drawer-section">
+          <div class="section-heading">
+            <h3>场地成员</h3>
+            <p>先到先得占比赛席，主持人可以手动调整。</p>
+          </div>
+          <div class="participant-list" id="participant-list"></div>
+        </section>
+
+        <section class="drawer-section">
+          <h3>身份揭晓</h3>
+          <div class="button-row">
+            <button type="button" class="ghost-btn reveal-btn" data-scope="hidden">全部隐藏</button>
+            <button type="button" class="ghost-btn reveal-btn" data-scope="red">揭晓红方</button>
+            <button type="button" class="ghost-btn reveal-btn" data-scope="black">揭晓黑方</button>
+            <button type="button" class="primary-btn reveal-btn" data-scope="all">全部揭晓</button>
+          </div>
+        </section>
+
+        <section class="drawer-section">
+          <h3>比赛控制</h3>
+          <div class="button-row">
+            <button type="button" class="primary-btn" id="start-match-btn">开始比赛</button>
+            <button type="button" class="ghost-btn" id="pause-match-btn">暂停</button>
+            <button type="button" class="ghost-btn" id="resume-match-btn">恢复</button>
+            <button type="button" class="ghost-btn danger" id="reset-match-btn">重开一局</button>
+          </div>
+        </section>
+      </div>
+    </div>
+  </aside>
+
+  <section class="join-screen" id="join-screen">
+    <div class="join-card">
+      <p class="eyebrow">ROOM ENTRY</p>
+      <h2>进入你的比赛场地</h2>
+      <p class="join-copy">
+        无需登录。输入一个比赛码进入房间；如果房间不存在，你会成为主持人。
+      </p>
+
+      <label class="field">
+        <span>比赛码</span>
+        <input id="room-code-input" placeholder="例如 douququ-01">
+      </label>
+      <label class="field">
+        <span>展示名（可选）</span>
+        <input id="display-name-input" placeholder="例如：主持人、小明、路人观众">
+      </label>
+      <label class="field">
+        <span>入场意图</span>
+        <select id="join-intent-select">
+          <option value="spectator">先当观众</option>
+          <option value="auto">自动分配</option>
+          <option value="player">抢比赛席</option>
+        </select>
+      </label>
+
+      <div class="join-actions">
+        <button type="button" class="ghost-btn" id="random-room-btn">随机生成比赛码</button>
+        <button type="button" class="primary-btn" id="join-room-btn">进入比赛</button>
+      </div>
+
+      <p class="join-note" id="join-note"></p>
+    </div>
+  </section>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
