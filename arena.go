@@ -481,6 +481,71 @@ func (a *Arena) SetPicoclawMode(code, hostParticipantID, participantID string, m
 	return state, nil
 }
 
+func (a *Arena) InvitePicoclaw(code, hostParticipantID, participantID string) (string, error) {
+	a.mu.Lock()
+	room, err := a.hostRoomLocked(code, hostParticipantID)
+	if err != nil {
+		a.mu.Unlock()
+		return "", err
+	}
+	if _, err := managedPicoclawRuntimeLocked(room, participantID); err != nil {
+		a.mu.Unlock()
+		return "", err
+	}
+	participant := findParticipantByID(room, participantID)
+	if participant == nil {
+		a.mu.Unlock()
+		return "", fmt.Errorf("participant not found")
+	}
+	player := PlayerConfig{
+		Name:    participant.DisplayName,
+		BaseURL: participant.BaseURL,
+		APIKey:  participant.APIKey,
+	}
+	roomCode := room.Code
+	a.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	reply, _, inviteErr := sendPicoclawInvite(ctx, defaultHTTPClient(), roomCode, player)
+	now := time.Now()
+	status := "ok"
+	if inviteErr != nil {
+		status = inviteErr.Error()
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	room, err = a.hostRoomLocked(code, hostParticipantID)
+	if err != nil {
+		if inviteErr != nil {
+			return "", inviteErr
+		}
+		return "", err
+	}
+	state, err := managedPicoclawRuntimeLocked(room, participantID)
+	if err != nil {
+		if inviteErr != nil {
+			return "", inviteErr
+		}
+		return "", err
+	}
+	state.LastInviteAt = now
+	state.LastInviteStatus = status
+	room.PicoclawRuntime[participantID] = state
+	room.UpdatedAt = now
+	if err := a.saveLocked(); err != nil {
+		if inviteErr != nil {
+			return "", inviteErr
+		}
+		return "", err
+	}
+	if inviteErr != nil {
+		return "", inviteErr
+	}
+	return reply, nil
+}
+
 func (a *Arena) UpdateReveal(code string, hostParticipantID string, state RevealState) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()

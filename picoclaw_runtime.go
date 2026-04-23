@@ -35,6 +35,8 @@ type PicoclawRuntimeState struct {
 	LastHeartbeatAt    time.Time             `json:"last_heartbeat_at,omitempty"`
 	LeaseExpiresAt     time.Time             `json:"lease_expires_at,omitempty"`
 	RecoveryDeadlineAt time.Time             `json:"recovery_deadline_at,omitempty"`
+	LastInviteAt       time.Time             `json:"last_invite_at,omitempty"`
+	LastInviteStatus   string                `json:"last_invite_status,omitempty"`
 }
 
 func newPicoclawRuntimeState(participantID string) PicoclawRuntimeState {

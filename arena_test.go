@@ -530,6 +530,105 @@ func TestArenaAdvanceOnceUsesPicoclawMessageTransportForManagedSeat(t *testing.T
 	}
 }
 
+func TestInvitePicoclawUsesMessageEndpoint(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+	defer arena.Close()
+
+	var messageReq picoMessageRequest
+	messageCalls := 0
+	inviteCalls := 0
+	messageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/message":
+			messageCalls++
+			if err := json.NewDecoder(r.Body).Decode(&messageReq); err != nil {
+				t.Fatalf("Decode() message request error = %v", err)
+			}
+			writeJSON(w, http.StatusOK, picoMessageResponse{
+				Reply: "邀请已发送",
+			})
+		case "/invite":
+			inviteCalls++
+			writeJSON(w, http.StatusOK, picoMessageResponse{
+				Reply: "unused",
+			})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer messageServer.Close()
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    "invite-message-room",
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("Enter(host) error = %v", err)
+	}
+	if _, err := arena.Enter(EnterRequest{
+		RoomCode:    "invite-message-room",
+		ClientToken: "guest-token",
+		JoinIntent:  JoinIntentPlayer,
+	}); err != nil {
+		t.Fatalf("Enter(guest) error = %v", err)
+	}
+	if err := arena.AssignSeat(hostView.Room.Code, hostView.Participant.ID, SeatAssignRequest{
+		Seat: SeatBlackPlayer,
+		Binding: AgentBinding{
+			RealType:    AgentTypePicoclaw,
+			Name:        "托管黑方",
+			PublicAlias: "黑雨伞",
+			Connection:  "managed",
+			BaseURL:     messageServer.URL,
+		},
+	}); err != nil {
+		t.Fatalf("AssignSeat() error = %v", err)
+	}
+
+	hostRoom, err := arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() error = %v", err)
+	}
+	participantID := hostRoom.Room.Seats[SeatBlackPlayer].ParticipantID
+	if participantID == "" {
+		t.Fatalf("expected managed picoclaw participant on black seat")
+	}
+
+	reply, err := arena.InvitePicoclaw(hostView.Room.Code, hostView.Participant.ID, participantID)
+	if err != nil {
+		t.Fatalf("InvitePicoclaw() error = %v", err)
+	}
+	if reply != "邀请已发送" {
+		t.Fatalf("expected invite reply 邀请已发送, got %q", reply)
+	}
+	if messageCalls != 1 {
+		t.Fatalf("expected exactly one /message call, got %d", messageCalls)
+	}
+	if inviteCalls != 0 {
+		t.Fatalf("expected no /invite call, got %d", inviteCalls)
+	}
+	if strings.TrimSpace(messageReq.Message) == "" {
+		t.Fatalf("expected invite payload message to be non-empty")
+	}
+	if !strings.Contains(messageReq.Message, "邀请") {
+		t.Fatalf("expected invite prompt to indicate invitation semantics, got %q", messageReq.Message)
+	}
+
+	hostRoom, err = arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() after invite error = %v", err)
+	}
+	runtime := hostRoom.Runtime[participantID]
+	if runtime.LastInviteAt.IsZero() {
+		t.Fatalf("expected runtime.last_invite_at to be set")
+	}
+	if runtime.LastInviteStatus != "ok" {
+		t.Fatalf("expected runtime.last_invite_status ok, got %q", runtime.LastInviteStatus)
+	}
+}
+
 func TestAssignSeatCreatesPicoclawRuntimeState(t *testing.T) {
 	store := NewMemorySnapshotStore()
 	arena := NewArena(store)

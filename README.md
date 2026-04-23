@@ -128,7 +128,13 @@ GOTOOLCHAIN=local go run . --host 0.0.0.0 --port 8080
 - 修改默认视图
 - 配置红黑席位
 - 开始、暂停、恢复、重开比赛
-- 查看 transport 运行状态
+
+当前席位类型只支持：
+
+- `human`
+- `picoclaw`
+
+其他 AI agent 暂时不会进入实际对局流程，前端会显示“其他 AI agent 等待适配中”。
 
 ### 3. 人类选手走子
 
@@ -138,139 +144,72 @@ GOTOOLCHAIN=local go run . --host 0.0.0.0 --port 8080
 - 再点目标格
 - 前端会提交到 `/api/arena/{code}/move`
 
-## Service 级 Transport 切换
-
-当前实现支持两种服务默认 transport 模式：
-
-- `http_session`
-- `websocket`
-
-切换接口：
-
-### 查看当前默认模式
-
-```bash
-curl http://127.0.0.1:8080/api/admin/transport
-```
-
-示例返回：
-
-```json
-{
-  "default_mode": "http_session",
-  "config_version": 0,
-  "updated_at": "0001-01-01T00:00:00Z"
-}
-```
-
-### 切到 WebSocket
-
-```bash
-curl -X POST http://127.0.0.1:8080/api/admin/transport \
-  -H 'Content-Type: application/json' \
-  -d '{"default_mode":"websocket"}'
-```
-
-### 切到 HTTP Session
-
-```bash
-curl -X POST http://127.0.0.1:8080/api/admin/transport \
-  -H 'Content-Type: application/json' \
-  -d '{"default_mode":"http_session"}'
-```
-
-注意：
-
-- 这是服务级默认值
-- 只影响之后新开的对局
-- 已经开始的对局会保持开局时锁定的 transport mode
-- 如果某局以 `websocket` 开局，但 WebSocket 失败，服务端会尝试自动降级到 `http_session`
-
 ## Agent 接入说明
 
-当前实现里，受管 agent 仍然通过席位配置里的 `base_url` 接入。
+当前只支持 `picoclaw`，并通过它的 `/message` 接口完成：
 
-### HTTP Session 模式
+- 对局中的走子请求
+- 托管席位的邀请通知
 
-当对局使用 `http_session` 时，arena 会主动请求 agent：
+主持人在席位配置里填写的 `Base URL`，就是 picoclaw 服务监听地址，例如：
 
-- `POST {base_url}/session/open`
-- `POST {base_url}/session/turn`
+- `http://192.168.31.160:18800`
+- `http://192.168.31.130:18888`
 
-#### `/session/open`
+arena 会自动请求：
 
-请求体示例：
+```text
+POST {base_url}/message
+```
+
+如果你填的是根地址，程序会自动补成 `/message`；如果已经带了 `/message`，则直接使用。
+
+请求体格式：
 
 ```json
 {
-  "player_name": "托管黑方",
-  "player_type": "pico"
+  "session_id": "xiangqi-abcd1234",
+  "sender_id": "picoclaw-xiangqi-arena",
+  "sender_display_name": "Picoclaw Xiangqi Arena",
+  "message": "你正在参加一场中国象棋对局......\nMOVE: h9-g7",
+  "api_key": "optional"
 }
 ```
 
-响应体示例：
+说明：
+
+- `session_id`：同一局棋会复用同一个比赛级会话标识
+- `message`：包含当前棋盘、合法走法、己方身份、对手公开身份等上下文
+- `api_key`：如果席位里填写了 API Key，会同时写入 JSON 体，并额外带上请求头 `X-PicoClaw-API-Key`
+
+响应体格式：
 
 ```json
 {
-  "session_id": "sess-1",
-  "resume_token": "resume-1",
-  "lease_ttl_ms": 30000,
-  "connection_state": "connected"
-}
-```
-
-#### `/session/turn`
-
-请求体示例：
-
-```json
-{
-  "protocol_version": 1,
-  "match_id": "abcd1234",
-  "room_code": "demo-room",
-  "seat": "black_player",
-  "side": "black",
-  "transport_mode": "http_session",
-  "turn_id": "abcd1234-black-1",
-  "move_count": 1,
-  "step_interval_ms": 1500,
-  "opponent_alias": "玻璃杯",
-  "board_rows": ["rnbakabnr", ".........", ".....c..."],
-  "board_text": "...",
-  "legal_moves": ["a3-a4", "c3-c4"],
-  "prompt": "..."
-}
-```
-
-响应体示例：
-
-```json
-{
-  "turn_id": "abcd1234-black-1",
-  "move": "a3-a4",
   "reply": "MOVE: a3-a4",
-  "agent_state": "ok",
-  "session_id": "sess-1"
+  "error": ""
 }
 ```
 
-### WebSocket 模式
+约定：
 
-当对局使用 `websocket` 时，arena 会主动连：
+- arena 会从 `reply` 中提取形如 `MOVE: a3-a4` 的走法
+- 如果响应不是 JSON，或者 `reply` 里没有合法走法，这一手会记为失败并暂停比赛
+- `picoclaw` 席位在开局前必须配置 `Base URL`
+
+邀请流程（当前版本）：
+
+- 主持人触发托管 `picoclaw` 邀请时，arena 同样调用 `POST {base_url}/message`
+- `message` 内容会明确标注“邀请”语义，并要求对方确认收到邀请
+- 邀请诊断会记录到席位 runtime（`last_invite_at`、`last_invite_status`）
+
+预留接口（仅文档说明，当前不会调用）：
 
 ```text
-ws://host:port/ws
+POST {base_url}/invite
 ```
 
-如果 `base_url` 是 `http://127.0.0.1:9000`，arena 会自动转成：
-
-```text
-ws://127.0.0.1:9000/ws
-```
-
-消息内容和 HTTP session 的 `AgentTurnRequest / AgentTurnResponse` 一致，只是通过 WebSocket 收发。
-
-如果 WebSocket 建连或读写失败，服务端会尝试降级到 `http_session`。
+`/invite` 会在后续版本评估为独立邀请通道；当前发布版本仍只使用 `/message`。
 
 ## 编译
 
@@ -287,6 +226,13 @@ mkdir -p dist
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTOOLCHAIN=local go build -o dist/pico-xiangqi-arena-linux-amd64 .
 ```
 
+### 编译 Windows amd64 版本
+
+```bash
+mkdir -p dist
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GOTOOLCHAIN=local go build -o dist/pico-xiangqi-arena-windows-amd64.exe .
+```
+
 ## 测试
 
 运行全部测试：
@@ -299,16 +245,14 @@ GOTOOLCHAIN=local go test ./...
 
 这版已经支持：
 
-- 服务级默认 transport 模式切换
-- 对局启动时锁定 transport mode
-- `http_session` transport
-- `websocket` transport
-- WebSocket 失败后自动降级到 HTTP session
+- 房间与主持人流程
+- 浏览器端 human 选手走子
+- `picoclaw /message` 托管对局
+- `picoclaw /message` 托管邀请
+- 静态前端打包进二进制
 
-这版还没有完全做满的内容：
+这版暂未支持：
 
-- 独立 heartbeat API
-- 完整 resume 恢复流程
-- 更细的前端 transport 状态展示
-
-所以它现在更适合当“第一版可用实现”，后续可以继续把 keepalive 细节补齐。
+- 其他 AI agent 协议适配
+- 独立会话保活接口
+- 更细的 agent 运行状态面板
