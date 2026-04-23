@@ -1183,6 +1183,96 @@ func TestPicoclawModeRouteRejectsNonHostWith403(t *testing.T) {
 	}
 }
 
+func TestPicoclawModeRouteUpdatesManagedRuntimeState(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	enterHostReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"mode-success-room","client_token":"host-token","join_intent":"player"}`)))
+	enterHostReq.Header.Set("Content-Type", "application/json")
+	enterHostRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterHostRR, enterHostReq)
+	if enterHostRR.Code != http.StatusOK {
+		t.Fatalf("enter host expected 200, got %d body=%s", enterHostRR.Code, enterHostRR.Body.String())
+	}
+
+	enterGuestReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"mode-success-room","client_token":"guest-token","join_intent":"player"}`)))
+	enterGuestReq.Header.Set("Content-Type", "application/json")
+	enterGuestRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterGuestRR, enterGuestReq)
+	if enterGuestRR.Code != http.StatusOK {
+		t.Fatalf("enter guest expected 200, got %d body=%s", enterGuestRR.Code, enterGuestRR.Body.String())
+	}
+
+	assignReq := httptest.NewRequest(http.MethodPost, "/api/arena/mode-success-room/seats/assign", bytes.NewReader([]byte(`{"host_token":"host-token","seat":"black_player","binding":{"real_type":"picoclaw","name":"black pico","public_alias":"黑雨伞","connection":"managed","base_url":"http://127.0.0.1:18888"}}`)))
+	assignReq.Header.Set("Content-Type", "application/json")
+	assignRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(assignRR, assignReq)
+	if assignRR.Code != http.StatusOK {
+		t.Fatalf("assign expected 200, got %d body=%s", assignRR.Code, assignRR.Body.String())
+	}
+
+	hostReq := httptest.NewRequest(http.MethodGet, "/api/arena/mode-success-room/host?token=host-token", nil)
+	hostRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(hostRR, hostReq)
+	if hostRR.Code != http.StatusOK {
+		t.Fatalf("host room expected 200, got %d body=%s", hostRR.Code, hostRR.Body.String())
+	}
+
+	var hostView struct {
+		Room struct {
+			Seats map[string]struct {
+				ParticipantID string `json:"participant_id"`
+			} `json:"seats"`
+		} `json:"room"`
+	}
+	if err := json.NewDecoder(hostRR.Body).Decode(&hostView); err != nil {
+		t.Fatalf("Decode() host view error = %v", err)
+	}
+	participantID := hostView.Room.Seats[string(SeatBlackPlayer)].ParticipantID
+	if participantID == "" {
+		t.Fatalf("expected managed participant on black seat")
+	}
+
+	modeReq := httptest.NewRequest(http.MethodPost, "/api/arena/mode-success-room/picoclaw/"+participantID+"/mode", bytes.NewReader([]byte(`{"host_token":"host-token","preferred_mode":"prefer_session"}`)))
+	modeReq.Header.Set("Content-Type", "application/json")
+	modeRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(modeRR, modeReq)
+	if modeRR.Code != http.StatusOK {
+		t.Fatalf("mode route expected 200, got %d body=%s", modeRR.Code, modeRR.Body.String())
+	}
+
+	var modeView PicoclawRuntimeState
+	if err := json.NewDecoder(modeRR.Body).Decode(&modeView); err != nil {
+		t.Fatalf("Decode() mode view error = %v", err)
+	}
+	if modeView.ParticipantID != participantID {
+		t.Fatalf("expected participant_id %q, got %q", participantID, modeView.ParticipantID)
+	}
+	if modeView.PreferredMode != PicoclawModePreferSession {
+		t.Fatalf("expected preferred_mode prefer_session, got %q", modeView.PreferredMode)
+	}
+
+	verifyHostReq := httptest.NewRequest(http.MethodGet, "/api/arena/mode-success-room/host?token=host-token", nil)
+	verifyHostRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(verifyHostRR, verifyHostReq)
+	if verifyHostRR.Code != http.StatusOK {
+		t.Fatalf("host room verify expected 200, got %d body=%s", verifyHostRR.Code, verifyHostRR.Body.String())
+	}
+
+	var verifyHostView struct {
+		Runtime map[string]PicoclawRuntimeState `json:"runtime"`
+	}
+	if err := json.NewDecoder(verifyHostRR.Body).Decode(&verifyHostView); err != nil {
+		t.Fatalf("Decode() verify host view error = %v", err)
+	}
+	persisted, ok := verifyHostView.Runtime[participantID]
+	if !ok {
+		t.Fatalf("expected persisted runtime for participant %q", participantID)
+	}
+	if persisted.PreferredMode != PicoclawModePreferSession {
+		t.Fatalf("expected persisted preferred_mode prefer_session, got %q", persisted.PreferredMode)
+	}
+}
+
 func TestHostRoomIncludesPicoclawRuntimeDiagnostics(t *testing.T) {
 	app := NewApp(NewMemorySnapshotStore())
 

@@ -671,6 +671,14 @@ function runtimeSessionStateLabel(value) {
   return normalized || "idle";
 }
 
+function cssEscapeSafe(value) {
+  const text = String(value || "");
+  if (window.CSS && typeof window.CSS.escape === "function") {
+    return window.CSS.escape(text);
+  }
+  return text.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
 function renderPicoclawRuntime() {
   if (!dom.picoclawRuntimeList) {
     return;
@@ -1519,8 +1527,9 @@ function bindEvents() {
       if (!participantID) {
         return;
       }
+      const participantSelector = cssEscapeSafe(participantID);
       const select = dom.picoclawRuntimeList.querySelector(
-        '.runtime-mode-select[data-participant-id="' + participantID + '"]'
+        '.runtime-mode-select[data-participant-id="' + participantSelector + '"]'
       );
       const preferredMode =
         select instanceof HTMLSelectElement ? select.value : "auto";
