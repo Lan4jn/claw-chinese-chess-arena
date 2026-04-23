@@ -621,6 +621,47 @@ func TestSnapshotPersistsPicoclawRuntimeState(t *testing.T) {
 		t.Fatalf("AssignSeat() error = %v", err)
 	}
 
+	hostRoomBefore, err := arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() before reload error = %v", err)
+	}
+	seatBefore := hostRoomBefore.Room.Seats[SeatBlackPlayer]
+	if seatBefore.ParticipantID == "" {
+		t.Fatalf("expected black seat participant before reload")
+	}
+
+	wantLease := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	want := PicoclawRuntimeState{
+		ParticipantID:  seatBefore.ParticipantID,
+		PreferredMode:  PicoclawModePreferSession,
+		ActiveMode:     PicoclawActiveModeSession,
+		SessionState:   PicoclawSessionStateActive,
+		SessionID:      "sess-roundtrip-1",
+		LeaseExpiresAt: wantLease,
+	}
+
+	snapshot, err := store.Load()
+	if err != nil {
+		t.Fatalf("store.Load() error = %v", err)
+	}
+	var roomFound bool
+	for _, room := range snapshot.Rooms {
+		if room.Code != hostView.Room.Code {
+			continue
+		}
+		roomFound = true
+		if room.PicoclawRuntime == nil {
+			room.PicoclawRuntime = make(map[string]PicoclawRuntimeState)
+		}
+		room.PicoclawRuntime[seatBefore.ParticipantID] = want
+	}
+	if !roomFound {
+		t.Fatalf("expected room %q in snapshot", hostView.Room.Code)
+	}
+	if err := store.Save(snapshot); err != nil {
+		t.Fatalf("store.Save() error = %v", err)
+	}
+
 	reloaded := NewArena(store)
 	defer reloaded.Close()
 
@@ -629,7 +670,26 @@ func TestSnapshotPersistsPicoclawRuntimeState(t *testing.T) {
 		t.Fatalf("HostRoom() after reload error = %v", err)
 	}
 	seat := hostRoom.Room.Seats[SeatBlackPlayer]
-	if hostRoom.Runtime[seat.ParticipantID].ParticipantID == "" {
+	got, ok := hostRoom.Runtime[seat.ParticipantID]
+	if !ok {
 		t.Fatalf("expected persisted runtime state for participant %q", seat.ParticipantID)
+	}
+	if got.ParticipantID != want.ParticipantID {
+		t.Fatalf("expected participant_id %q, got %q", want.ParticipantID, got.ParticipantID)
+	}
+	if got.PreferredMode != want.PreferredMode {
+		t.Fatalf("expected preferred_mode %q, got %q", want.PreferredMode, got.PreferredMode)
+	}
+	if got.ActiveMode != want.ActiveMode {
+		t.Fatalf("expected active_mode %q, got %q", want.ActiveMode, got.ActiveMode)
+	}
+	if got.SessionState != want.SessionState {
+		t.Fatalf("expected session_state %q, got %q", want.SessionState, got.SessionState)
+	}
+	if got.SessionID != want.SessionID {
+		t.Fatalf("expected session_id %q, got %q", want.SessionID, got.SessionID)
+	}
+	if !got.LeaseExpiresAt.Equal(want.LeaseExpiresAt) {
+		t.Fatalf("expected lease_expires_at %s, got %s", want.LeaseExpiresAt.Format(time.RFC3339), got.LeaseExpiresAt.Format(time.RFC3339))
 	}
 }
