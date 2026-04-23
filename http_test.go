@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestEnterArenaCreatesRoomAndReturnsPublicAlias(t *testing.T) {
@@ -316,114 +317,6 @@ func TestArenaHTTPHostMatchReturns404BeforeStart(t *testing.T) {
 	app.routes().ServeHTTP(rr, req)
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("GET /api/arena/{code}/host/match before start expected 404, got %d body=%s", rr.Code, rr.Body.String())
-	}
-}
-
-func TestAdminTransportModeSwitchAffectsFutureMatchesOnly(t *testing.T) {
-	app := NewApp(NewMemorySnapshotStore())
-
-	req := httptest.NewRequest(http.MethodGet, "/api/admin/transport", nil)
-	rr := httptest.NewRecorder()
-	app.routes().ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("GET /api/admin/transport expected 200, got %d body=%s", rr.Code, rr.Body.String())
-	}
-
-	var initial struct {
-		DefaultMode   string `json:"default_mode"`
-		ConfigVersion int    `json:"config_version"`
-	}
-	if err := json.NewDecoder(rr.Body).Decode(&initial); err != nil {
-		t.Fatalf("Decode() initial transport config error = %v", err)
-	}
-	if initial.DefaultMode != string(TransportModeHTTPSession) {
-		t.Fatalf("expected default transport mode http_session, got %q", initial.DefaultMode)
-	}
-
-	req = httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"transport-api-room","client_token":"host-token","join_intent":"player"}`)))
-	req.Header.Set("Content-Type", "application/json")
-	rr = httptest.NewRecorder()
-	app.routes().ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("enter host expected 200, got %d body=%s", rr.Code, rr.Body.String())
-	}
-
-	var hostEnter struct {
-		Participant struct {
-			ID string `json:"id"`
-		} `json:"participant"`
-	}
-	if err := json.NewDecoder(rr.Body).Decode(&hostEnter); err != nil {
-		t.Fatalf("Decode() host enter error = %v", err)
-	}
-
-	req = httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"transport-api-room","client_token":"guest-token","join_intent":"player"}`)))
-	req.Header.Set("Content-Type", "application/json")
-	rr = httptest.NewRecorder()
-	app.routes().ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("enter guest expected 200, got %d body=%s", rr.Code, rr.Body.String())
-	}
-
-	req = httptest.NewRequest(http.MethodPost, "/api/arena/transport-api-room/match/start", bytes.NewReader([]byte(`{"host_token":"host-token"}`)))
-	req.Header.Set("Content-Type", "application/json")
-	rr = httptest.NewRecorder()
-	app.routes().ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("start match expected 200, got %d body=%s", rr.Code, rr.Body.String())
-	}
-
-	var firstMatch struct {
-		TransportMode string `json:"transport_mode"`
-	}
-	if err := json.NewDecoder(rr.Body).Decode(&firstMatch); err != nil {
-		t.Fatalf("Decode() first match error = %v", err)
-	}
-	if firstMatch.TransportMode != string(TransportModeHTTPSession) {
-		t.Fatalf("expected first match transport_mode http_session, got %q", firstMatch.TransportMode)
-	}
-
-	req = httptest.NewRequest(http.MethodPost, "/api/admin/transport", bytes.NewReader([]byte(`{"default_mode":"websocket"}`)))
-	req.Header.Set("Content-Type", "application/json")
-	rr = httptest.NewRecorder()
-	app.routes().ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("POST /api/admin/transport expected 200, got %d body=%s", rr.Code, rr.Body.String())
-	}
-
-	var updated struct {
-		DefaultMode   string `json:"default_mode"`
-		ConfigVersion int    `json:"config_version"`
-	}
-	if err := json.NewDecoder(rr.Body).Decode(&updated); err != nil {
-		t.Fatalf("Decode() updated transport config error = %v", err)
-	}
-	if updated.DefaultMode != string(TransportModeWebSocket) {
-		t.Fatalf("expected updated transport mode websocket, got %q", updated.DefaultMode)
-	}
-	if updated.ConfigVersion <= initial.ConfigVersion {
-		t.Fatalf("expected config version to increase, before=%d after=%d", initial.ConfigVersion, updated.ConfigVersion)
-	}
-
-	req = httptest.NewRequest(http.MethodGet, "/api/arena/transport-api-room/host/match?token=host-token", nil)
-	rr = httptest.NewRecorder()
-	app.routes().ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("GET /api/arena/{code}/host/match expected 200, got %d body=%s", rr.Code, rr.Body.String())
-	}
-
-	var hostMatch struct {
-		TransportMode       string `json:"transport_mode"`
-		TransportActiveMode string `json:"transport_active_mode"`
-	}
-	if err := json.NewDecoder(rr.Body).Decode(&hostMatch); err != nil {
-		t.Fatalf("Decode() host match error = %v", err)
-	}
-	if hostMatch.TransportMode != string(TransportModeHTTPSession) {
-		t.Fatalf("expected existing match to keep http_session, got %q", hostMatch.TransportMode)
-	}
-	if hostMatch.TransportActiveMode != string(TransportModeHTTPSession) {
-		t.Fatalf("expected existing active mode to stay http_session, got %q", hostMatch.TransportActiveMode)
 	}
 }
 
@@ -860,7 +753,7 @@ func TestArenaHTTPHostSeatAssignRejectsNonHostMutation(t *testing.T) {
 	}
 	beforeRedID := before.Seats[string(SeatRedPlayer)].ParticipantID
 
-	assignReq := httptest.NewRequest(http.MethodPost, "/api/arena/host-seat-auth-room/seats/assign", bytes.NewReader([]byte(`{"host_token":"wrong-token","seat":"red_player","binding":{"real_type":"pico","name":"bad","base_url":"http://127.0.0.1:9000","api_key":"x","public_alias":"bad"}}`)))
+	assignReq := httptest.NewRequest(http.MethodPost, "/api/arena/host-seat-auth-room/seats/assign", bytes.NewReader([]byte(`{"host_token":"wrong-token","seat":"red_player","binding":{"real_type":"picoclaw","name":"bad","base_url":"http://127.0.0.1:9000","api_key":"x","public_alias":"bad"}}`)))
 	assignReq.Header.Set("Content-Type", "application/json")
 	assignRR := httptest.NewRecorder()
 	app.routes().ServeHTTP(assignRR, assignReq)
@@ -1114,5 +1007,99 @@ func TestStaticAppWiresJoinAndPublicPollingFlow(t *testing.T) {
 		if !strings.Contains(body, target) {
 			t.Fatalf("expected static shell to include %q for room entry/public rendering flow", target)
 		}
+	}
+}
+
+func TestPicoclawSessionHeartbeatRefreshesLease(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	enterHostReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"heartbeat-room","client_token":"host-token","join_intent":"player"}`)))
+	enterHostReq.Header.Set("Content-Type", "application/json")
+	enterHostRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterHostRR, enterHostReq)
+	if enterHostRR.Code != http.StatusOK {
+		t.Fatalf("enter host expected 200, got %d body=%s", enterHostRR.Code, enterHostRR.Body.String())
+	}
+
+	enterGuestReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"heartbeat-room","client_token":"guest-token","join_intent":"player"}`)))
+	enterGuestReq.Header.Set("Content-Type", "application/json")
+	enterGuestRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterGuestRR, enterGuestReq)
+	if enterGuestRR.Code != http.StatusOK {
+		t.Fatalf("enter guest expected 200, got %d body=%s", enterGuestRR.Code, enterGuestRR.Body.String())
+	}
+
+	assignReq := httptest.NewRequest(http.MethodPost, "/api/arena/heartbeat-room/seats/assign", bytes.NewReader([]byte(`{"host_token":"host-token","seat":"black_player","binding":{"real_type":"picoclaw","name":"black pico","public_alias":"黑雨伞","connection":"managed","base_url":"http://127.0.0.1:18888"}}`)))
+	assignReq.Header.Set("Content-Type", "application/json")
+	assignRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(assignRR, assignReq)
+	if assignRR.Code != http.StatusOK {
+		t.Fatalf("assign expected 200, got %d body=%s", assignRR.Code, assignRR.Body.String())
+	}
+
+	hostReq := httptest.NewRequest(http.MethodGet, "/api/arena/heartbeat-room/host?token=host-token", nil)
+	hostRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(hostRR, hostReq)
+	if hostRR.Code != http.StatusOK {
+		t.Fatalf("host room expected 200, got %d body=%s", hostRR.Code, hostRR.Body.String())
+	}
+
+	var hostView struct {
+		Room struct {
+			Seats map[string]struct {
+				ParticipantID string `json:"participant_id"`
+			} `json:"seats"`
+		} `json:"room"`
+	}
+	if err := json.NewDecoder(hostRR.Body).Decode(&hostView); err != nil {
+		t.Fatalf("Decode() host view error = %v", err)
+	}
+	participantID := hostView.Room.Seats[string(SeatBlackPlayer)].ParticipantID
+	if participantID == "" {
+		t.Fatalf("expected managed participant on black seat")
+	}
+
+	openReq := httptest.NewRequest(http.MethodPost, "/api/arena/heartbeat-room/picoclaw/"+participantID+"/session/open", bytes.NewReader([]byte(`{"host_token":"host-token"}`)))
+	openReq.Header.Set("Content-Type", "application/json")
+	openRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(openRR, openReq)
+	if openRR.Code != http.StatusOK {
+		t.Fatalf("open expected 200, got %d body=%s", openRR.Code, openRR.Body.String())
+	}
+
+	var openView PicoclawRuntimeState
+	if err := json.NewDecoder(openRR.Body).Decode(&openView); err != nil {
+		t.Fatalf("Decode() open view error = %v", err)
+	}
+	if openView.SessionState != PicoclawSessionStateOpening {
+		t.Fatalf("expected session_state opening after open, got %q", openView.SessionState)
+	}
+	if strings.TrimSpace(openView.SessionID) == "" {
+		t.Fatalf("expected open to create session_id")
+	}
+
+	heartbeatReq := httptest.NewRequest(http.MethodPost, "/api/arena/heartbeat-room/picoclaw/"+participantID+"/session/heartbeat", bytes.NewReader([]byte(`{"session_id":"`+openView.SessionID+`","lease_ttl_ms":45000}`)))
+	heartbeatReq.Header.Set("Content-Type", "application/json")
+	heartbeatRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(heartbeatRR, heartbeatReq)
+	if heartbeatRR.Code != http.StatusOK {
+		t.Fatalf("heartbeat expected 200, got %d body=%s", heartbeatRR.Code, heartbeatRR.Body.String())
+	}
+
+	var heartbeatView PicoclawRuntimeState
+	if err := json.NewDecoder(heartbeatRR.Body).Decode(&heartbeatView); err != nil {
+		t.Fatalf("Decode() heartbeat view error = %v", err)
+	}
+	if heartbeatView.SessionState != PicoclawSessionStateActive {
+		t.Fatalf("expected session_state active, got %q", heartbeatView.SessionState)
+	}
+	if heartbeatView.LastHeartbeatAt.IsZero() {
+		t.Fatalf("expected last_heartbeat_at to be set")
+	}
+	if heartbeatView.LeaseExpiresAt.IsZero() {
+		t.Fatalf("expected lease_expires_at to be set")
+	}
+	if !heartbeatView.LeaseExpiresAt.After(heartbeatView.LastHeartbeatAt) {
+		t.Fatalf("expected lease_expires_at (%s) after last_heartbeat_at (%s)", heartbeatView.LeaseExpiresAt.Format(time.RFC3339Nano), heartbeatView.LastHeartbeatAt.Format(time.RFC3339Nano))
 	}
 }

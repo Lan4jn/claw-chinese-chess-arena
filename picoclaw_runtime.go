@@ -27,12 +27,14 @@ const (
 )
 
 type PicoclawRuntimeState struct {
-	ParticipantID  string                `json:"participant_id"`
-	PreferredMode  PicoclawPreferredMode `json:"preferred_mode"`
-	ActiveMode     PicoclawActiveMode    `json:"active_mode"`
-	SessionState   PicoclawSessionState  `json:"session_state"`
-	SessionID      string                `json:"session_id,omitempty"`
-	LeaseExpiresAt time.Time             `json:"lease_expires_at,omitempty"`
+	ParticipantID      string                `json:"participant_id"`
+	PreferredMode      PicoclawPreferredMode `json:"preferred_mode"`
+	ActiveMode         PicoclawActiveMode    `json:"active_mode"`
+	SessionState       PicoclawSessionState  `json:"session_state"`
+	SessionID          string                `json:"session_id,omitempty"`
+	LastHeartbeatAt    time.Time             `json:"last_heartbeat_at,omitempty"`
+	LeaseExpiresAt     time.Time             `json:"lease_expires_at,omitempty"`
+	RecoveryDeadlineAt time.Time             `json:"recovery_deadline_at,omitempty"`
 }
 
 func newPicoclawRuntimeState(participantID string) PicoclawRuntimeState {
@@ -46,4 +48,21 @@ func newPicoclawRuntimeState(participantID string) PicoclawRuntimeState {
 
 func (s PicoclawRuntimeState) SessionHealthy(now time.Time) bool {
 	return s.SessionState == PicoclawSessionStateActive && !s.LeaseExpiresAt.IsZero() && now.Before(s.LeaseExpiresAt)
+}
+
+func resolvePicoclawActiveMode(state PicoclawRuntimeState, now time.Time) PicoclawActiveMode {
+	switch state.PreferredMode {
+	case PicoclawModePreferMessage:
+		return PicoclawActiveModeMessage
+	case PicoclawModePreferSession:
+		if state.SessionState == PicoclawSessionStateOpening || state.SessionHealthy(now) {
+			return PicoclawActiveModeSession
+		}
+		return PicoclawActiveModeMessage
+	default:
+		if state.SessionHealthy(now) {
+			return PicoclawActiveModeSession
+		}
+		return PicoclawActiveModeMessage
+	}
 }

@@ -355,6 +355,130 @@ func (a *Arena) HostRoom(code string, requester string) (HostRoomView, error) {
 	return view, nil
 }
 
+func (a *Arena) OpenPicoclawSession(code, hostParticipantID, participantID string) (PicoclawRuntimeState, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	room, err := a.hostRoomLocked(code, hostParticipantID)
+	if err != nil {
+		return PicoclawRuntimeState{}, err
+	}
+	state, err := managedPicoclawRuntimeLocked(room, participantID)
+	if err != nil {
+		return PicoclawRuntimeState{}, err
+	}
+
+	sessionID, err := randomID()
+	if err != nil {
+		return PicoclawRuntimeState{}, err
+	}
+	now := time.Now()
+	state.SessionID = sessionID
+	state.SessionState = PicoclawSessionStateOpening
+	state.LastHeartbeatAt = time.Time{}
+	state.LeaseExpiresAt = time.Time{}
+	state.RecoveryDeadlineAt = time.Time{}
+	state.ActiveMode = resolvePicoclawActiveMode(state, now)
+	room.PicoclawRuntime[participantID] = state
+	room.UpdatedAt = now
+	if err := a.saveLocked(); err != nil {
+		return PicoclawRuntimeState{}, err
+	}
+	return state, nil
+}
+
+func (a *Arena) HeartbeatPicoclawSession(code, participantID, sessionID string, ttl time.Duration) (PicoclawRuntimeState, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	room, ok := a.rooms[normalizeRoomCode(code)]
+	if !ok {
+		return PicoclawRuntimeState{}, fmt.Errorf("room not found")
+	}
+	state, err := managedPicoclawRuntimeLocked(room, participantID)
+	if err != nil {
+		return PicoclawRuntimeState{}, err
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return PicoclawRuntimeState{}, fmt.Errorf("session_id is required")
+	}
+	if state.SessionID != sessionID {
+		return PicoclawRuntimeState{}, fmt.Errorf("session mismatch")
+	}
+	if ttl <= 0 {
+		ttl = 45 * time.Second
+	}
+	now := time.Now()
+	state.LastHeartbeatAt = now
+	state.LeaseExpiresAt = now.Add(ttl)
+	state.SessionState = PicoclawSessionStateActive
+	state.ActiveMode = resolvePicoclawActiveMode(state, now)
+	room.PicoclawRuntime[participantID] = state
+	room.UpdatedAt = now
+	if err := a.saveLocked(); err != nil {
+		return PicoclawRuntimeState{}, err
+	}
+	return state, nil
+}
+
+func (a *Arena) ClosePicoclawSession(code, hostParticipantID, participantID string) (PicoclawRuntimeState, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	room, err := a.hostRoomLocked(code, hostParticipantID)
+	if err != nil {
+		return PicoclawRuntimeState{}, err
+	}
+	state, err := managedPicoclawRuntimeLocked(room, participantID)
+	if err != nil {
+		return PicoclawRuntimeState{}, err
+	}
+
+	now := time.Now()
+	state.SessionState = PicoclawSessionStateClosed
+	state.SessionID = ""
+	state.LastHeartbeatAt = time.Time{}
+	state.LeaseExpiresAt = time.Time{}
+	state.RecoveryDeadlineAt = time.Time{}
+	state.ActiveMode = resolvePicoclawActiveMode(state, now)
+	room.PicoclawRuntime[participantID] = state
+	room.UpdatedAt = now
+	if err := a.saveLocked(); err != nil {
+		return PicoclawRuntimeState{}, err
+	}
+	return state, nil
+}
+
+func (a *Arena) SetPicoclawMode(code, hostParticipantID, participantID string, mode PicoclawPreferredMode) (PicoclawRuntimeState, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	switch mode {
+	case PicoclawModeAuto, PicoclawModePreferSession, PicoclawModePreferMessage:
+	default:
+		return PicoclawRuntimeState{}, fmt.Errorf("unsupported preferred_mode")
+	}
+
+	room, err := a.hostRoomLocked(code, hostParticipantID)
+	if err != nil {
+		return PicoclawRuntimeState{}, err
+	}
+	state, err := managedPicoclawRuntimeLocked(room, participantID)
+	if err != nil {
+		return PicoclawRuntimeState{}, err
+	}
+
+	now := time.Now()
+	state.PreferredMode = mode
+	state.ActiveMode = resolvePicoclawActiveMode(state, now)
+	room.PicoclawRuntime[participantID] = state
+	room.UpdatedAt = now
+	if err := a.saveLocked(); err != nil {
+		return PicoclawRuntimeState{}, err
+	}
+	return state, nil
+}
+
 func (a *Arena) UpdateReveal(code string, hostParticipantID string, state RevealState) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -956,6 +1080,24 @@ func findParticipantByID(room *ArenaRoom, id string) *Participant {
 		}
 	}
 	return nil
+}
+
+func managedPicoclawRuntimeLocked(room *ArenaRoom, participantID string) (PicoclawRuntimeState, error) {
+	participant := findParticipantByID(room, participantID)
+	if participant == nil {
+		return PicoclawRuntimeState{}, fmt.Errorf("participant not found")
+	}
+	if participant.Connection != "managed" ||
+		normalizeAgentType(participant.RealType) != AgentTypePicoclaw ||
+		(participant.Seat != SeatRedPlayer && participant.Seat != SeatBlackPlayer) {
+		return PicoclawRuntimeState{}, fmt.Errorf("participant is not managed picoclaw")
+	}
+	ensurePicoclawRuntime(room, participant)
+	state, ok := room.PicoclawRuntime[participantID]
+	if !ok {
+		return PicoclawRuntimeState{}, fmt.Errorf("participant runtime not found")
+	}
+	return state, nil
 }
 
 func normalizeRoomCode(code string) string {

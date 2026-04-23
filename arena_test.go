@@ -693,3 +693,149 @@ func TestSnapshotPersistsPicoclawRuntimeState(t *testing.T) {
 		t.Fatalf("expected lease_expires_at %s, got %s", want.LeaseExpiresAt.Format(time.RFC3339), got.LeaseExpiresAt.Format(time.RFC3339))
 	}
 }
+
+func TestHostCanChangePicoclawPreferredMode(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+	defer arena.Close()
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    "runtime-mode-room",
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("Enter(host) error = %v", err)
+	}
+	if _, err := arena.Enter(EnterRequest{
+		RoomCode:    "runtime-mode-room",
+		ClientToken: "guest-token",
+		JoinIntent:  JoinIntentPlayer,
+	}); err != nil {
+		t.Fatalf("Enter(guest) error = %v", err)
+	}
+	if err := arena.AssignSeat(hostView.Room.Code, hostView.Participant.ID, SeatAssignRequest{
+		Seat: SeatRedPlayer,
+		Binding: AgentBinding{
+			RealType:    AgentTypePicoclaw,
+			Name:        "红方 Pico",
+			PublicAlias: "红雨伞",
+			Connection:  "managed",
+			BaseURL:     "http://127.0.0.1:18881",
+		},
+	}); err != nil {
+		t.Fatalf("AssignSeat(red) error = %v", err)
+	}
+	if err := arena.AssignSeat(hostView.Room.Code, hostView.Participant.ID, SeatAssignRequest{
+		Seat: SeatBlackPlayer,
+		Binding: AgentBinding{
+			RealType:    AgentTypePicoclaw,
+			Name:        "黑方 Pico",
+			PublicAlias: "黑雨伞",
+			Connection:  "managed",
+			BaseURL:     "http://127.0.0.1:18882",
+		},
+	}); err != nil {
+		t.Fatalf("AssignSeat(black) error = %v", err)
+	}
+
+	roomView, err := arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() error = %v", err)
+	}
+	redID := roomView.Room.Seats[SeatRedPlayer].ParticipantID
+	blackID := roomView.Room.Seats[SeatBlackPlayer].ParticipantID
+	if redID == "" || blackID == "" {
+		t.Fatalf("expected both managed participants to exist")
+	}
+
+	runtime, err := arena.SetPicoclawMode(hostView.Room.Code, hostView.Participant.ID, blackID, PicoclawModePreferSession)
+	if err != nil {
+		t.Fatalf("SetPicoclawMode() error = %v", err)
+	}
+	if runtime.PreferredMode != PicoclawModePreferSession {
+		t.Fatalf("expected preferred_mode prefer_session, got %q", runtime.PreferredMode)
+	}
+
+	roomView, err = arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() after mode change error = %v", err)
+	}
+	if roomView.Runtime[blackID].PreferredMode != PicoclawModePreferSession {
+		t.Fatalf("expected black runtime preferred_mode prefer_session, got %q", roomView.Runtime[blackID].PreferredMode)
+	}
+	if roomView.Runtime[redID].PreferredMode != PicoclawModeAuto {
+		t.Fatalf("expected red runtime preferred_mode auto, got %q", roomView.Runtime[redID].PreferredMode)
+	}
+}
+
+func TestPicoclawSessionCloseMarksSessionClosed(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+	defer arena.Close()
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    "runtime-close-room",
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("Enter(host) error = %v", err)
+	}
+	if _, err := arena.Enter(EnterRequest{
+		RoomCode:    "runtime-close-room",
+		ClientToken: "guest-token",
+		JoinIntent:  JoinIntentPlayer,
+	}); err != nil {
+		t.Fatalf("Enter(guest) error = %v", err)
+	}
+	if err := arena.AssignSeat(hostView.Room.Code, hostView.Participant.ID, SeatAssignRequest{
+		Seat: SeatBlackPlayer,
+		Binding: AgentBinding{
+			RealType:    AgentTypePicoclaw,
+			Name:        "黑方 Pico",
+			PublicAlias: "黑雨伞",
+			Connection:  "managed",
+			BaseURL:     "http://127.0.0.1:18888",
+		},
+	}); err != nil {
+		t.Fatalf("AssignSeat() error = %v", err)
+	}
+
+	roomView, err := arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() error = %v", err)
+	}
+	participantID := roomView.Room.Seats[SeatBlackPlayer].ParticipantID
+	if participantID == "" {
+		t.Fatalf("expected managed participant on black seat")
+	}
+
+	opened, err := arena.OpenPicoclawSession(hostView.Room.Code, hostView.Participant.ID, participantID)
+	if err != nil {
+		t.Fatalf("OpenPicoclawSession() error = %v", err)
+	}
+	if opened.SessionState != PicoclawSessionStateOpening {
+		t.Fatalf("expected opening session_state, got %q", opened.SessionState)
+	}
+	if strings.TrimSpace(opened.SessionID) == "" {
+		t.Fatalf("expected open to create session_id")
+	}
+	if _, err := arena.HeartbeatPicoclawSession(hostView.Room.Code, participantID, opened.SessionID, 45*time.Second); err != nil {
+		t.Fatalf("HeartbeatPicoclawSession() error = %v", err)
+	}
+
+	closed, err := arena.ClosePicoclawSession(hostView.Room.Code, hostView.Participant.ID, participantID)
+	if err != nil {
+		t.Fatalf("ClosePicoclawSession() error = %v", err)
+	}
+	if closed.SessionState != PicoclawSessionStateClosed {
+		t.Fatalf("expected session_state closed, got %q", closed.SessionState)
+	}
+	if !closed.LeaseExpiresAt.IsZero() {
+		t.Fatalf("expected lease_expires_at to be cleared, got %s", closed.LeaseExpiresAt.Format(time.RFC3339Nano))
+	}
+	if !closed.RecoveryDeadlineAt.IsZero() {
+		t.Fatalf("expected recovery_deadline_at to be cleared, got %s", closed.RecoveryDeadlineAt.Format(time.RFC3339Nano))
+	}
+}

@@ -59,28 +59,6 @@ func (a *App) routes() http.Handler {
 		})
 	})))
 
-	mux.HandleFunc("/api/admin/transport", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet, http.MethodHead:
-			writeJSON(w, http.StatusOK, a.arena.TransportConfig())
-		case http.MethodPost:
-			var req struct {
-				DefaultMode TransportMode `json:"default_mode"`
-			}
-			if err := decodeJSON(r, &req); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-				return
-			}
-			if err := a.arena.SetTransportDefaultMode(req.DefaultMode); err != nil {
-				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-				return
-			}
-			writeJSON(w, http.StatusOK, a.arena.TransportConfig())
-		default:
-			methodNotAllowed(w, http.MethodGet, http.MethodHead, http.MethodPost)
-		}
-	})
-
 	mux.HandleFunc("/api/arena/enter", methodHandler(http.MethodPost, func(w http.ResponseWriter, r *http.Request) {
 		var req EnterRequest
 		if err := decodeJSON(r, &req); err != nil {
@@ -351,6 +329,80 @@ func (a *App) routes() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+		if participantID, subpath, isPicoclawRoute := arenaPicoclawRouteParts(tail); isPicoclawRoute {
+			if methodForDispatch(r.Method) != http.MethodPost {
+				methodNotAllowed(w, http.MethodPost)
+				return
+			}
+			switch subpath {
+			case "session/open":
+				var req struct {
+					HostToken string `json:"host_token"`
+				}
+				if err := decodeJSON(r, &req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				view, err := a.arena.OpenPicoclawSession(code, req.HostToken, participantID)
+				if err != nil {
+					writeArenaRouteError(w, err, http.StatusForbidden)
+					return
+				}
+				writeJSON(w, http.StatusOK, view)
+				return
+			case "session/heartbeat":
+				var req struct {
+					SessionID  string `json:"session_id"`
+					LeaseTTLMS int64  `json:"lease_ttl_ms"`
+				}
+				if err := decodeJSON(r, &req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				ttl := time.Duration(req.LeaseTTLMS) * time.Millisecond
+				view, err := a.arena.HeartbeatPicoclawSession(code, participantID, req.SessionID, ttl)
+				if err != nil {
+					writeArenaRouteError(w, err, http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, view)
+				return
+			case "session/close":
+				var req struct {
+					HostToken string `json:"host_token"`
+				}
+				if err := decodeJSON(r, &req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				view, err := a.arena.ClosePicoclawSession(code, req.HostToken, participantID)
+				if err != nil {
+					writeArenaRouteError(w, err, http.StatusForbidden)
+					return
+				}
+				writeJSON(w, http.StatusOK, view)
+				return
+			case "mode":
+				var req struct {
+					HostToken string                `json:"host_token"`
+					Mode      PicoclawPreferredMode `json:"preferred_mode"`
+				}
+				if err := decodeJSON(r, &req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				view, err := a.arena.SetPicoclawMode(code, req.HostToken, participantID, req.Mode)
+				if err != nil {
+					writeArenaRouteError(w, err, http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, view)
+				return
+			default:
+				http.NotFound(w, r)
+				return
+			}
+		}
 
 		routesByMethod, ok := arenaRoutes[tail]
 		if !ok {
@@ -451,6 +503,24 @@ func arenaRouteParts(path string) (string, string, bool) {
 		return parts[0], "", true
 	}
 	return parts[0], strings.Join(parts[1:], "/"), true
+}
+
+func arenaPicoclawRouteParts(tail string) (string, string, bool) {
+	parts := strings.Split(tail, "/")
+	if len(parts) < 3 || parts[0] != "picoclaw" || parts[1] == "" {
+		return "", "", false
+	}
+	participantID := parts[1]
+	if len(parts) == 3 && parts[2] == "mode" {
+		return participantID, "mode", true
+	}
+	if len(parts) == 4 && parts[2] == "session" {
+		switch parts[3] {
+		case "open", "heartbeat", "close":
+			return participantID, "session/" + parts[3], true
+		}
+	}
+	return "", "", false
 }
 
 func decodeJSON(r *http.Request, dst any) error {
