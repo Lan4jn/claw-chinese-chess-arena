@@ -599,12 +599,6 @@ func (a *Arena) StartMatch(code string, hostParticipantID string) (PublicMatchVi
 		SideRed:   red.ID,
 		SideBlack: black.ID,
 	}
-	if err := validateManagedPlayer(players[SideRed]); err != nil {
-		return PublicMatchView{}, fmt.Errorf("red player: %w", err)
-	}
-	if err := validateManagedPlayer(players[SideBlack]); err != nil {
-		return PublicMatchView{}, fmt.Errorf("black player: %w", err)
-	}
 	match, err := NewMatch(room.Code, room.StepIntervalMS, players, aliases, participants)
 	if err != nil {
 		return PublicMatchView{}, err
@@ -1006,30 +1000,6 @@ func normalizeAgentType(kind string) string {
 	}
 }
 
-func validateManagedType(kind string) error {
-	switch normalizeAgentType(kind) {
-	case AgentTypeHuman, AgentTypePicoclaw:
-		return nil
-	default:
-		return fmt.Errorf("other ai agent waiting for adaptation")
-	}
-}
-
-func validateManagedPlayer(player PlayerConfig) error {
-	player.Type = normalizeAgentType(player.Type)
-	switch player.Type {
-	case AgentTypeHuman:
-		return nil
-	case AgentTypePicoclaw:
-		if strings.TrimSpace(player.BaseURL) == "" {
-			return fmt.Errorf("picoclaw base_url is required")
-		}
-		return nil
-	default:
-		return fmt.Errorf("other ai agent waiting for adaptation")
-	}
-}
-
 func currentParticipant(room *ArenaRoom, match *Match) *Participant {
 	if match == nil {
 		return nil
@@ -1041,9 +1011,6 @@ func (a *Arena) bindSeatLocked(room *ArenaRoom, seatType SeatType, binding Agent
 	seat, ok := room.Seats[seatType]
 	if !ok || seatType == SeatHost {
 		return fmt.Errorf("seat not found")
-	}
-	if err := validateManagedType(binding.RealType); err != nil {
-		return err
 	}
 	participant := findParticipantByID(room, seat.ParticipantID)
 	if participant != nil && participant.Connection != "managed" {
@@ -1126,9 +1093,6 @@ func (a *Arena) updateParticipantBinding(code string, requester string, binding 
 	participant := findParticipantByToken(room, requester)
 	if participant == nil {
 		return fmt.Errorf("participant not found")
-	}
-	if err := validateManagedType(binding.RealType); err != nil {
-		return err
 	}
 	participant.RealType = normalizeAgentType(binding.RealType)
 	participant.DisplayName = strings.TrimSpace(binding.Name)

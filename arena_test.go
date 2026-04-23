@@ -530,40 +530,6 @@ func TestArenaAdvanceOnceUsesPicoclawMessageTransportForManagedSeat(t *testing.T
 	}
 }
 
-func TestArenaStartMatchRejectsUnsupportedAIAgentType(t *testing.T) {
-	arena := NewArena(NewMemorySnapshotStore())
-	defer arena.Close()
-
-	hostView, err := arena.Enter(EnterRequest{
-		RoomCode:    "unsupported-agent-room",
-		ClientToken: "host-token",
-		JoinIntent:  JoinIntentPlayer,
-	})
-	if err != nil {
-		t.Fatalf("Enter(host) error = %v", err)
-	}
-	if _, err := arena.Enter(EnterRequest{
-		RoomCode:    "unsupported-agent-room",
-		ClientToken: "guest-token",
-		JoinIntent:  JoinIntentPlayer,
-	}); err != nil {
-		t.Fatalf("Enter(guest) error = %v", err)
-	}
-
-	if err := arena.AssignSeat(hostView.Room.Code, hostView.Participant.ID, SeatAssignRequest{
-		Seat: SeatBlackPlayer,
-		Binding: AgentBinding{
-			RealType:    "custom_agent",
-			Name:        "等待适配对象",
-			PublicAlias: "黑雨伞",
-			Connection:  "managed",
-			BaseURL:     "http://127.0.0.1:9001",
-		},
-	}); err == nil {
-		t.Fatalf("expected unsupported AI agent binding to fail")
-	}
-}
-
 func TestAssignSeatCreatesPicoclawRuntimeState(t *testing.T) {
 	store := NewMemorySnapshotStore()
 	arena := NewArena(store)
