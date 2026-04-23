@@ -393,7 +393,7 @@ func (a *App) routes() http.Handler {
 				}
 				view, err := a.arena.SetPicoclawMode(code, req.HostToken, participantID, req.Mode)
 				if err != nil {
-					writeArenaRouteError(w, err, http.StatusBadRequest)
+					writeArenaRouteError(w, err, http.StatusForbidden)
 					return
 				}
 				writeJSON(w, http.StatusOK, view)

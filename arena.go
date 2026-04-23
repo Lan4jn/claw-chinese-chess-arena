@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -368,7 +370,7 @@ func (a *Arena) OpenPicoclawSession(code, hostParticipantID, participantID strin
 		return PicoclawRuntimeState{}, err
 	}
 
-	sessionID, err := randomID()
+	sessionID, err := randomSessionID()
 	if err != nil {
 		return PicoclawRuntimeState{}, err
 	}
@@ -1102,6 +1104,14 @@ func managedPicoclawRuntimeLocked(room *ArenaRoom, participantID string) (Picocl
 
 func normalizeRoomCode(code string) string {
 	return strings.TrimSpace(strings.ToLower(code))
+}
+
+func randomSessionID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 var defaultAliases = []string{

@@ -1078,10 +1078,14 @@ func TestPicoclawSessionHeartbeatRefreshesLease(t *testing.T) {
 		t.Fatalf("expected open to create session_id")
 	}
 
+	requestedTTL := 45 * time.Second
+	tolerance := 3 * time.Second
+	beforeHeartbeat := time.Now()
 	heartbeatReq := httptest.NewRequest(http.MethodPost, "/api/arena/heartbeat-room/picoclaw/"+participantID+"/session/heartbeat", bytes.NewReader([]byte(`{"session_id":"`+openView.SessionID+`","lease_ttl_ms":45000}`)))
 	heartbeatReq.Header.Set("Content-Type", "application/json")
 	heartbeatRR := httptest.NewRecorder()
 	app.routes().ServeHTTP(heartbeatRR, heartbeatReq)
+	afterHeartbeat := time.Now()
 	if heartbeatRR.Code != http.StatusOK {
 		t.Fatalf("heartbeat expected 200, got %d body=%s", heartbeatRR.Code, heartbeatRR.Body.String())
 	}
@@ -1101,5 +1105,73 @@ func TestPicoclawSessionHeartbeatRefreshesLease(t *testing.T) {
 	}
 	if !heartbeatView.LeaseExpiresAt.After(heartbeatView.LastHeartbeatAt) {
 		t.Fatalf("expected lease_expires_at (%s) after last_heartbeat_at (%s)", heartbeatView.LeaseExpiresAt.Format(time.RFC3339Nano), heartbeatView.LastHeartbeatAt.Format(time.RFC3339Nano))
+	}
+	earliestExpected := beforeHeartbeat.Add(requestedTTL - tolerance)
+	latestExpected := afterHeartbeat.Add(requestedTTL + tolerance)
+	if heartbeatView.LeaseExpiresAt.Before(earliestExpected) || heartbeatView.LeaseExpiresAt.After(latestExpected) {
+		t.Fatalf(
+			"expected lease_expires_at near requested ttl: got=%s expected_range=[%s,%s]",
+			heartbeatView.LeaseExpiresAt.Format(time.RFC3339Nano),
+			earliestExpected.Format(time.RFC3339Nano),
+			latestExpected.Format(time.RFC3339Nano),
+		)
+	}
+}
+
+func TestPicoclawModeRouteRejectsNonHostWith403(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	enterHostReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"mode-auth-room","client_token":"host-token","join_intent":"player"}`)))
+	enterHostReq.Header.Set("Content-Type", "application/json")
+	enterHostRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterHostRR, enterHostReq)
+	if enterHostRR.Code != http.StatusOK {
+		t.Fatalf("enter host expected 200, got %d body=%s", enterHostRR.Code, enterHostRR.Body.String())
+	}
+
+	enterGuestReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"mode-auth-room","client_token":"guest-token","join_intent":"player"}`)))
+	enterGuestReq.Header.Set("Content-Type", "application/json")
+	enterGuestRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterGuestRR, enterGuestReq)
+	if enterGuestRR.Code != http.StatusOK {
+		t.Fatalf("enter guest expected 200, got %d body=%s", enterGuestRR.Code, enterGuestRR.Body.String())
+	}
+
+	assignReq := httptest.NewRequest(http.MethodPost, "/api/arena/mode-auth-room/seats/assign", bytes.NewReader([]byte(`{"host_token":"host-token","seat":"black_player","binding":{"real_type":"picoclaw","name":"black pico","public_alias":"黑雨伞","connection":"managed","base_url":"http://127.0.0.1:18888"}}`)))
+	assignReq.Header.Set("Content-Type", "application/json")
+	assignRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(assignRR, assignReq)
+	if assignRR.Code != http.StatusOK {
+		t.Fatalf("assign expected 200, got %d body=%s", assignRR.Code, assignRR.Body.String())
+	}
+
+	hostReq := httptest.NewRequest(http.MethodGet, "/api/arena/mode-auth-room/host?token=host-token", nil)
+	hostRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(hostRR, hostReq)
+	if hostRR.Code != http.StatusOK {
+		t.Fatalf("host room expected 200, got %d body=%s", hostRR.Code, hostRR.Body.String())
+	}
+
+	var hostView struct {
+		Room struct {
+			Seats map[string]struct {
+				ParticipantID string `json:"participant_id"`
+			} `json:"seats"`
+		} `json:"room"`
+	}
+	if err := json.NewDecoder(hostRR.Body).Decode(&hostView); err != nil {
+		t.Fatalf("Decode() host view error = %v", err)
+	}
+	participantID := hostView.Room.Seats[string(SeatBlackPlayer)].ParticipantID
+	if participantID == "" {
+		t.Fatalf("expected managed participant on black seat")
+	}
+
+	modeReq := httptest.NewRequest(http.MethodPost, "/api/arena/mode-auth-room/picoclaw/"+participantID+"/mode", bytes.NewReader([]byte(`{"host_token":"guest-token","preferred_mode":"prefer_session"}`)))
+	modeReq.Header.Set("Content-Type", "application/json")
+	modeRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(modeRR, modeReq)
+	if modeRR.Code != http.StatusForbidden {
+		t.Fatalf("mode route expected 403 for non-host token, got %d body=%s", modeRR.Code, modeRR.Body.String())
 	}
 }
