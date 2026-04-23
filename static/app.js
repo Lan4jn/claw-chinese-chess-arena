@@ -60,6 +60,7 @@ const dom = {
   selectionHint: null,
   eventList: null,
   participantList: null,
+  picoclawRuntimeList: null,
   clearSelectionButton: null,
   hostDrawer: null,
   hostDrawerToggle: null,
@@ -186,6 +187,31 @@ function revealLabel(value) {
 
 function sideLabel(side) {
   return side === "red" ? "红方" : side === "black" ? "黑方" : "未开始";
+}
+
+function normalizeAgentType(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw || raw === "human") {
+    return "human";
+  }
+  if (raw === "pico" || raw === "picoclaw") {
+    return "picoclaw";
+  }
+  return raw;
+}
+
+function agentTypeLabel(value) {
+  const normalized = normalizeAgentType(value);
+  if (normalized === "human") {
+    return "human";
+  }
+  if (normalized === "picoclaw") {
+    return "picoclaw";
+  }
+  if (normalized === "hidden") {
+    return "hidden";
+  }
+  return "其他 AI agent 等待适配中";
 }
 
 function applyViewMode(nextView) {
@@ -358,6 +384,16 @@ async function removeSeat(seat) {
   });
 }
 
+async function setPicoclawPreferredMode(participantID, preferredMode) {
+  return apiRequest(hostPath("/picoclaw/" + encodeURIComponent(participantID) + "/mode"), {
+    method: "POST",
+    body: {
+      host_token: state.clientToken,
+      preferred_mode: preferredMode,
+    },
+  });
+}
+
 async function enterRoom(payload) {
   const response = await apiRequest("/api/arena/enter", {
     method: "POST",
@@ -399,7 +435,7 @@ function renderSeatCard(element, seatType, seatInfo) {
   const detail = occupied
     ? "席位已占用"
     : "暂无选手，主持人可在设置中配置";
-  const realType = seatInfo && seatInfo.real_type ? seatInfo.real_type : "hidden";
+  const realType = seatInfo && seatInfo.real_type ? agentTypeLabel(seatInfo.real_type) : "hidden";
 
   element.innerHTML =
     '<div class="seat-head">' +
@@ -492,7 +528,7 @@ function canCurrentParticipantSubmitHumanMove() {
   if (!seatInfo.participant_id || seatInfo.participant_id !== state.participant.id) {
     return { allowed: false, reason: "当前行动方不是你，无法提交走子。" };
   }
-  if (seatInfo.real_type && seatInfo.real_type !== "human") {
+  if (normalizeAgentType(seatInfo.real_type) !== "human") {
     return { allowed: false, reason: "当前行动方不是 human，无法手动走子。" };
   }
   return { allowed: true, reason: "" };
@@ -601,11 +637,123 @@ function renderParticipants() {
         '</span></header><p class="participant-meta">连接：' +
         escapeHTML(participant.connection || "ui") +
         " · 类型：" +
-        escapeHTML(participant.real_type || "human") +
+        escapeHTML(agentTypeLabel(participant.real_type || "human")) +
         "</p></article>"
       );
     })
     .join("");
+}
+
+function formatRuntimeTime(raw) {
+  if (!raw) {
+    return "-";
+  }
+  const at = new Date(raw);
+  if (Number.isNaN(at.getTime())) {
+    return "-";
+  }
+  return at.toLocaleString();
+}
+
+function runtimeModeLabel(value) {
+  switch (value) {
+    case "prefer_session":
+      return "prefer_session";
+    case "prefer_message":
+      return "prefer_message";
+    default:
+      return "auto";
+  }
+}
+
+function runtimeSessionStateLabel(value) {
+  const normalized = String(value || "").trim();
+  return normalized || "idle";
+}
+
+function renderPicoclawRuntime() {
+  if (!dom.picoclawRuntimeList) {
+    return;
+  }
+  if (!state.isHost || !state.hostRoom || !state.hostRoom.room || !Array.isArray(state.hostRoom.participants)) {
+    dom.picoclawRuntimeList.innerHTML =
+      '<article class="participant-item"><p class="participant-meta">仅主持人可查看 runtime 诊断。</p></article>';
+    return;
+  }
+
+  const runtimeByParticipantID =
+    state.hostRoom.runtime && typeof state.hostRoom.runtime === "object" ? state.hostRoom.runtime : {};
+  const managedPicoclaw = state.hostRoom.participants.filter((participant) => {
+    const normalizedType = normalizeAgentType(participant.real_type || "");
+    const isPlayerSeat = participant.seat === "red_player" || participant.seat === "black_player";
+    return normalizedType === "picoclaw" && participant.connection === "managed" && isPlayerSeat;
+  });
+
+  if (managedPicoclaw.length === 0) {
+    dom.picoclawRuntimeList.innerHTML =
+      '<article class="participant-item"><p class="participant-meta">当前没有托管 picoclaw 比赛席位。</p></article>';
+    return;
+  }
+
+  dom.picoclawRuntimeList.innerHTML = managedPicoclaw
+    .map((participant) => {
+      const runtime = runtimeByParticipantID[participant.id] || {};
+      const preferredMode = runtimeModeLabel(runtime.preferred_mode);
+      const activeMode = runtime.active_mode || "message";
+      const sessionState = runtimeSessionStateLabel(runtime.session_state);
+      const sessionID = runtime.session_id || "-";
+      const inviteStatus = runtime.last_invite_status || "-";
+      const heartbeatAt = formatRuntimeTime(runtime.last_heartbeat_at);
+      const leaseAt = formatRuntimeTime(runtime.lease_expires_at);
+      const inviteAt = formatRuntimeTime(runtime.last_invite_at);
+
+      return (
+        '<article class="participant-item" data-runtime-participant-id="' +
+        escapeHTML(participant.id) +
+        '"><header><strong>' +
+        escapeHTML(participant.public_alias || participant.id) +
+        "</strong><span>" +
+        escapeHTML(seatLabel(participant.seat)) +
+        '</span></header><p class="participant-meta">preferred: ' +
+        escapeHTML(preferredMode) +
+        " · active: " +
+        escapeHTML(activeMode) +
+        " · session: " +
+        escapeHTML(sessionState) +
+        '</p><p class="participant-meta">session_id: ' +
+        escapeHTML(sessionID) +
+        " · heartbeat: " +
+        escapeHTML(heartbeatAt) +
+        " · lease: " +
+        escapeHTML(leaseAt) +
+        '</p><p class="participant-meta">last_invite: ' +
+        escapeHTML(inviteAt) +
+        " · invite_status: " +
+        escapeHTML(inviteStatus) +
+        '</p><div class="button-row"><label class="field"><span>Preferred Mode</span><select class="runtime-mode-select" data-participant-id="' +
+        escapeHTML(participant.id) +
+        '"><option value="auto"' +
+        (preferredMode === "auto" ? " selected" : "") +
+        '>auto</option><option value="prefer_session"' +
+        (preferredMode === "prefer_session" ? " selected" : "") +
+        '>prefer_session</option><option value="prefer_message"' +
+        (preferredMode === "prefer_message" ? " selected" : "") +
+        '>prefer_message</option></select></label><button type="button" class="ghost-btn runtime-mode-save-btn" data-participant-id="' +
+        escapeHTML(participant.id) +
+        '">更新模式</button></div></article>'
+      );
+    })
+    .join("");
+}
+
+async function handleSaveRuntimeMode(participantID, preferredMode) {
+  if (!state.isHost || !participantID) {
+    return;
+  }
+  const normalizedMode = runtimeModeLabel(preferredMode);
+  await setPicoclawPreferredMode(participantID, normalizedMode);
+  await refreshAll();
+  setJoinNote("picoclaw preferred mode 已更新为 " + normalizedMode + "。");
 }
 
 function setHostDrawerOpen(isOpen) {
@@ -631,7 +779,7 @@ function extractSeatBinding(hostRoom, seatType) {
   }
   return {
     public_alias: participant.public_alias || "",
-    real_type: participant.real_type || "human",
+    real_type: normalizeAgentType(participant.real_type || "human"),
     name: participant.display_name || "",
     base_url: participant.base_url || "",
     api_key: "",
@@ -659,7 +807,7 @@ function populateSeatForm(form, binding) {
     aliasInput.value = safe.public_alias || "";
   }
   if (typeSelect) {
-    typeSelect.value = safe.real_type || "human";
+    typeSelect.value = normalizeAgentType(safe.real_type || "human");
   }
   if (nameInput) {
     nameInput.value = safe.name || "";
@@ -715,7 +863,7 @@ function readSeatBindingFromForm(form) {
   const apiKeyInput = form.elements.api_key;
   return {
     public_alias: aliasInput ? aliasInput.value.trim() : "",
-    real_type: typeSelect ? typeSelect.value.trim() : "human",
+    real_type: normalizeAgentType(typeSelect ? typeSelect.value.trim() : "human"),
     name: nameInput ? nameInput.value.trim() : "",
     base_url: baseURLInput ? baseURLInput.value.trim() : "",
     api_key: apiKeyInput ? apiKeyInput.value.trim() : "",
@@ -743,7 +891,7 @@ function seatAPIKeyCacheFingerprint(participant) {
   return [
     participant.id || "",
     participant.connection || "",
-    participant.real_type || "",
+    normalizeAgentType(participant.real_type || ""),
     participant.display_name || "",
     participant.base_url || "",
     participant.public_alias || "",
@@ -1052,6 +1200,7 @@ function renderSummary() {
   renderBoard();
   renderEvents();
   renderParticipants();
+  renderPicoclawRuntime();
   renderHostControls();
   updateHeaderState();
 }
@@ -1191,6 +1340,7 @@ function cacheDomElements() {
   dom.selectionHint = document.getElementById("selection-hint");
   dom.eventList = document.getElementById("event-list");
   dom.participantList = document.getElementById("participant-list");
+  dom.picoclawRuntimeList = document.getElementById("picoclaw-runtime-list");
   dom.clearSelectionButton = document.getElementById("clear-selection-btn");
   dom.viewButtons = Array.from(document.querySelectorAll(".view-btn[data-view]"));
   dom.hostDrawer = document.getElementById("host-drawer");
@@ -1354,6 +1504,32 @@ function bindEvents() {
       });
     });
   });
+
+  if (dom.picoclawRuntimeList) {
+    dom.picoclawRuntimeList.addEventListener("click", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+      const button = target.closest(".runtime-mode-save-btn");
+      if (!(button instanceof HTMLElement)) {
+        return;
+      }
+      const participantID = button.dataset.participantId || "";
+      if (!participantID) {
+        return;
+      }
+      const select = dom.picoclawRuntimeList.querySelector(
+        '.runtime-mode-select[data-participant-id="' + participantID + '"]'
+      );
+      const preferredMode =
+        select instanceof HTMLSelectElement ? select.value : "auto";
+      void handleSaveRuntimeMode(participantID, preferredMode).catch((err) => {
+        const message = err instanceof Error ? err.message : "更新 preferred mode 失败";
+        setJoinNote(message, true);
+      });
+    });
+  }
 
   const matchActionButtons = [
     [dom.startMatchButton, "start"],

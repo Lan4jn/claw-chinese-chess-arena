@@ -127,6 +127,8 @@ GOTOOLCHAIN=local go run . --host 0.0.0.0 --port 8080
 - 修改步间隔
 - 修改默认视图
 - 配置红黑席位
+- 查看托管 `picoclaw` runtime 诊断（`preferred_mode`、`active_mode`、`session_state`、邀请/心跳时间等）
+- 按席位切换托管 `picoclaw` 的 `preferred_mode`（`auto` / `prefer_session` / `prefer_message`）
 - 开始、暂停、恢复、重开比赛
 
 当前席位类型只支持：
@@ -146,10 +148,7 @@ GOTOOLCHAIN=local go run . --host 0.0.0.0 --port 8080
 
 ## Agent 接入说明
 
-当前只支持 `picoclaw`，并通过它的 `/message` 接口完成：
-
-- 对局中的走子请求
-- 托管席位的邀请通知
+当前只支持 `picoclaw`。走子链路采用 hybrid runtime 模型（session + message），邀请链路目前仍保持 `/message` 兼容。
 
 主持人在席位配置里填写的 `Base URL`，就是 picoclaw 服务监听地址，例如：
 
@@ -211,6 +210,15 @@ POST {base_url}/invite
 
 `/invite` 会在后续版本评估为独立邀请通道；当前发布版本仍只使用 `/message`。
 
+### Picoclaw Runtime 模型（Hybrid）
+
+- 每个托管 `picoclaw` 比赛席位都有独立 runtime 状态（host room `runtime` 字段）。
+- `preferred_mode` 由主持人控制：`auto`、`prefer_session`、`prefer_message`。
+- `active_mode` 为当前实际走子模式，可能因同回合回退而变化。
+- session 相关状态通过 participant 级 API 维护（open / heartbeat / close），并写入 `session_state`、`session_id`、`lease_expires_at`。
+- 对局走子支持同回合双通道回退：主模式失败时自动尝试另一路径，并记录模式切换原因与失败计数。
+- 邀请链路当前保持 `/message` 兼容，`/invite` 仍是预留能力。
+
 ## 编译
 
 ### 本机编译
@@ -249,10 +257,11 @@ GOTOOLCHAIN=local go test ./...
 - 浏览器端 human 选手走子
 - `picoclaw /message` 托管对局
 - `picoclaw /message` 托管邀请
+- 托管 `picoclaw` runtime 诊断（host room `runtime`）
+- participant 级 `preferred_mode` 控制与 session open/heartbeat/close
 - 静态前端打包进二进制
 
 这版暂未支持：
 
 - 其他 AI agent 协议适配
-- 独立会话保活接口
-- 更细的 agent 运行状态面板
+- `picoclaw /invite` 独立通道（当前仅保留兼容预留）

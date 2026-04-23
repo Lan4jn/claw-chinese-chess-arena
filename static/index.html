@@ -131,7 +131,7 @@
         <section class="drawer-section">
           <div class="section-heading">
             <h3>席位配置</h3>
-            <p>给红黑双方绑定人类或 Pico 等 agent。</p>
+            <p>当前仅支持 `human` 和 `picoclaw`。其他 AI agent 等待适配中。</p>
           </div>
           <div class="seat-config-grid">
             <form class="seat-config" data-seat="red_player">
@@ -141,9 +141,8 @@
                 <span>真实类型</span>
                 <select name="real_type">
                   <option value="human">human</option>
-                  <option value="pico">pico</option>
-                  <option value="claw">claw</option>
-                  <option value="custom_agent">custom_agent</option>
+                  <option value="picoclaw">picoclaw</option>
+                  <option value="" disabled>其他 AI agent 等待适配中</option>
                 </select>
               </label>
               <label class="field"><span>展示名</span><input name="name" placeholder="例如：本地 Pico"></label>
@@ -162,9 +161,8 @@
                 <span>真实类型</span>
                 <select name="real_type">
                   <option value="human">human</option>
-                  <option value="pico">pico</option>
-                  <option value="claw">claw</option>
-                  <option value="custom_agent">custom_agent</option>
+                  <option value="picoclaw">picoclaw</option>
+                  <option value="" disabled>其他 AI agent 等待适配中</option>
                 </select>
               </label>
               <label class="field"><span>展示名</span><input name="name" placeholder="例如：130 Pico"></label>
@@ -184,6 +182,14 @@
             <p>先到先得占比赛席，主持人可以手动调整。</p>
           </div>
           <div class="participant-list" id="participant-list"></div>
+        </section>
+
+        <section class="drawer-section">
+          <div class="section-heading">
+            <h3>Picoclaw Runtime</h3>
+            <p>仅显示托管 picoclaw 席位，支持逐席切换 preferred mode。</p>
+          </div>
+          <div class="participant-list" id="picoclaw-runtime-list"></div>
         </section>
 
         <section class="drawer-section">

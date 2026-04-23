@@ -976,6 +976,12 @@ func TestStaticAssetsAreServed(t *testing.T) {
 			if !strings.Contains(body, "state.selectedFrom") {
 				t.Fatalf("expected %s to include board source selection state", path)
 			}
+			if !strings.Contains(body, "/picoclaw/") {
+				t.Fatalf("expected %s to include picoclaw participant mode route wiring", path)
+			}
+			if !strings.Contains(body, "runtime-mode-save-btn") {
+				t.Fatalf("expected %s to include host runtime mode controls", path)
+			}
 		}
 	}
 }
@@ -1003,6 +1009,7 @@ func TestStaticAppWiresJoinAndPublicPollingFlow(t *testing.T) {
 		`id="board-grid"`,
 		`id="event-list"`,
 		`id="participant-list"`,
+		`id="picoclaw-runtime-list"`,
 	} {
 		if !strings.Contains(body, target) {
 			t.Fatalf("expected static shell to include %q for room entry/public rendering flow", target)
@@ -1173,5 +1180,74 @@ func TestPicoclawModeRouteRejectsNonHostWith403(t *testing.T) {
 	app.routes().ServeHTTP(modeRR, modeReq)
 	if modeRR.Code != http.StatusForbidden {
 		t.Fatalf("mode route expected 403 for non-host token, got %d body=%s", modeRR.Code, modeRR.Body.String())
+	}
+}
+
+func TestHostRoomIncludesPicoclawRuntimeDiagnostics(t *testing.T) {
+	app := NewApp(NewMemorySnapshotStore())
+
+	enterHostReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"runtime-room","client_token":"host-token","join_intent":"player"}`)))
+	enterHostReq.Header.Set("Content-Type", "application/json")
+	enterHostRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterHostRR, enterHostReq)
+	if enterHostRR.Code != http.StatusOK {
+		t.Fatalf("enter host expected 200, got %d body=%s", enterHostRR.Code, enterHostRR.Body.String())
+	}
+
+	enterGuestReq := httptest.NewRequest(http.MethodPost, "/api/arena/enter", bytes.NewReader([]byte(`{"room_code":"runtime-room","client_token":"guest-token","join_intent":"player"}`)))
+	enterGuestReq.Header.Set("Content-Type", "application/json")
+	enterGuestRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(enterGuestRR, enterGuestReq)
+	if enterGuestRR.Code != http.StatusOK {
+		t.Fatalf("enter guest expected 200, got %d body=%s", enterGuestRR.Code, enterGuestRR.Body.String())
+	}
+
+	assignReq := httptest.NewRequest(http.MethodPost, "/api/arena/runtime-room/seats/assign", bytes.NewReader([]byte(`{"host_token":"host-token","seat":"black_player","binding":{"real_type":"picoclaw","name":"black pico","public_alias":"黑雨伞","connection":"managed","base_url":"http://127.0.0.1:18888"}}`)))
+	assignReq.Header.Set("Content-Type", "application/json")
+	assignRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(assignRR, assignReq)
+	if assignRR.Code != http.StatusOK {
+		t.Fatalf("assign expected 200, got %d body=%s", assignRR.Code, assignRR.Body.String())
+	}
+
+	hostReq := httptest.NewRequest(http.MethodGet, "/api/arena/runtime-room/host?token=host-token", nil)
+	hostRR := httptest.NewRecorder()
+	app.routes().ServeHTTP(hostRR, hostReq)
+	if hostRR.Code != http.StatusOK {
+		t.Fatalf("host room expected 200, got %d body=%s", hostRR.Code, hostRR.Body.String())
+	}
+
+	var hostView struct {
+		Room struct {
+			Seats map[string]struct {
+				ParticipantID string `json:"participant_id"`
+			} `json:"seats"`
+		} `json:"room"`
+		Runtime map[string]PicoclawRuntimeState `json:"runtime"`
+	}
+	if err := json.NewDecoder(hostRR.Body).Decode(&hostView); err != nil {
+		t.Fatalf("Decode() host view error = %v", err)
+	}
+
+	participantID := hostView.Room.Seats[string(SeatBlackPlayer)].ParticipantID
+	if participantID == "" {
+		t.Fatalf("expected managed participant on black seat")
+	}
+
+	runtime, ok := hostView.Runtime[participantID]
+	if !ok {
+		t.Fatalf("expected runtime diagnostics for managed participant %q", participantID)
+	}
+	if runtime.ParticipantID != participantID {
+		t.Fatalf("expected runtime participant_id=%q, got %q", participantID, runtime.ParticipantID)
+	}
+	if runtime.PreferredMode != PicoclawModeAuto {
+		t.Fatalf("expected preferred_mode auto, got %q", runtime.PreferredMode)
+	}
+	if runtime.ActiveMode != PicoclawActiveModeMessage {
+		t.Fatalf("expected active_mode message before session heartbeat, got %q", runtime.ActiveMode)
+	}
+	if runtime.SessionState != PicoclawSessionStateIdle {
+		t.Fatalf("expected session_state idle for new managed runtime, got %q", runtime.SessionState)
 	}
 }

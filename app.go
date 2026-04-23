@@ -25,6 +25,8 @@ func writeArenaRouteError(w http.ResponseWriter, err error, defaultStatus int) {
 	switch err.Error() {
 	case "room not found", "match not started":
 		status = http.StatusNotFound
+	case "host permission required":
+		status = http.StatusForbidden
 	}
 
 	writeJSON(w, status, map[string]string{"error": err.Error()})
@@ -345,7 +347,7 @@ func (a *App) routes() http.Handler {
 				}
 				view, err := a.arena.OpenPicoclawSession(code, req.HostToken, participantID)
 				if err != nil {
-					writeArenaRouteError(w, err, http.StatusForbidden)
+					writeArenaRouteError(w, err, http.StatusBadRequest)
 					return
 				}
 				writeJSON(w, http.StatusOK, view)
@@ -377,7 +379,7 @@ func (a *App) routes() http.Handler {
 				}
 				view, err := a.arena.ClosePicoclawSession(code, req.HostToken, participantID)
 				if err != nil {
-					writeArenaRouteError(w, err, http.StatusForbidden)
+					writeArenaRouteError(w, err, http.StatusBadRequest)
 					return
 				}
 				writeJSON(w, http.StatusOK, view)
@@ -393,7 +395,7 @@ func (a *App) routes() http.Handler {
 				}
 				view, err := a.arena.SetPicoclawMode(code, req.HostToken, participantID, req.Mode)
 				if err != nil {
-					writeArenaRouteError(w, err, http.StatusForbidden)
+					writeArenaRouteError(w, err, http.StatusBadRequest)
 					return
 				}
 				writeJSON(w, http.StatusOK, view)
