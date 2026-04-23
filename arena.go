@@ -200,12 +200,13 @@ type HostMatchView struct {
 }
 
 type Arena struct {
-	mu          sync.Mutex
-	store       SnapshotStore
-	rooms       map[string]*ArenaRoom
-	requestMove func(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error)
-	ticker      *time.Ticker
-	done        chan struct{}
+	mu            sync.Mutex
+	store         SnapshotStore
+	rooms         map[string]*ArenaRoom
+	requestMove   func(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error)
+	requestInvite func(roomCode string, participant *Participant) (string, error)
+	ticker        *time.Ticker
+	done          chan struct{}
 }
 
 func NewArena(store SnapshotStore) *Arena {
@@ -216,6 +217,20 @@ func NewArena(store SnapshotStore) *Arena {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
 			return askPicoForMove(ctx, defaultHTTPClient(), matchID, player, state, legal, arenaState)
+		},
+		requestInvite: func(roomCode string, participant *Participant) (string, error) {
+			if participant == nil {
+				return "", fmt.Errorf("participant not found")
+			}
+			player := PlayerConfig{
+				Name:    participant.DisplayName,
+				BaseURL: participant.BaseURL,
+				APIKey:  participant.APIKey,
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			reply, _, err := sendPicoclawInvite(ctx, defaultHTTPClient(), roomCode, player)
+			return reply, err
 		},
 		ticker: time.NewTicker(400 * time.Millisecond),
 		done:   make(chan struct{}),
@@ -497,17 +512,11 @@ func (a *Arena) InvitePicoclaw(code, hostParticipantID, participantID string) (s
 		a.mu.Unlock()
 		return "", fmt.Errorf("participant not found")
 	}
-	player := PlayerConfig{
-		Name:    participant.DisplayName,
-		BaseURL: participant.BaseURL,
-		APIKey:  participant.APIKey,
-	}
+	participantCopy := *participant
 	roomCode := room.Code
 	a.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	defer cancel()
-	reply, _, inviteErr := sendPicoclawInvite(ctx, defaultHTTPClient(), roomCode, player)
+	reply, inviteErr := a.requestInvite(roomCode, &participantCopy)
 	now := time.Now()
 	status := "ok"
 	if inviteErr != nil {
@@ -519,14 +528,14 @@ func (a *Arena) InvitePicoclaw(code, hostParticipantID, participantID string) (s
 	room, err = a.hostRoomLocked(code, hostParticipantID)
 	if err != nil {
 		if inviteErr != nil {
-			return "", inviteErr
+			return "", fmt.Errorf("invite failed: %v; refresh room failed: %w", inviteErr, err)
 		}
 		return "", err
 	}
 	state, err := managedPicoclawRuntimeLocked(room, participantID)
 	if err != nil {
 		if inviteErr != nil {
-			return "", inviteErr
+			return "", fmt.Errorf("invite failed: %v; refresh runtime failed: %w", inviteErr, err)
 		}
 		return "", err
 	}
@@ -536,7 +545,7 @@ func (a *Arena) InvitePicoclaw(code, hostParticipantID, participantID string) (s
 	room.UpdatedAt = now
 	if err := a.saveLocked(); err != nil {
 		if inviteErr != nil {
-			return "", inviteErr
+			return "", fmt.Errorf("invite failed: %v; save runtime diagnostics failed: %w", inviteErr, err)
 		}
 		return "", err
 	}

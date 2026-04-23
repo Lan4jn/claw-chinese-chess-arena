@@ -3,12 +3,35 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+type failOnDemandSnapshotStore struct {
+	base *MemorySnapshotStore
+	fail bool
+}
+
+func newFailOnDemandSnapshotStore() *failOnDemandSnapshotStore {
+	return &failOnDemandSnapshotStore{
+		base: NewMemorySnapshotStore(),
+	}
+}
+
+func (s *failOnDemandSnapshotStore) Load() (*ArenaSnapshot, error) {
+	return s.base.Load()
+}
+
+func (s *failOnDemandSnapshotStore) Save(snapshot *ArenaSnapshot) error {
+	if s.fail {
+		return errors.New("save failed")
+	}
+	return s.base.Save(snapshot)
+}
 
 func TestArenaEnterCreatesRoomAndAssignsHost(t *testing.T) {
 	store := NewMemorySnapshotStore()
@@ -626,6 +649,198 @@ func TestInvitePicoclawUsesMessageEndpoint(t *testing.T) {
 	}
 	if runtime.LastInviteStatus != "ok" {
 		t.Fatalf("expected runtime.last_invite_status ok, got %q", runtime.LastInviteStatus)
+	}
+}
+
+func TestInvitePicoclawUsesInjectedRequestHook(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+	defer arena.Close()
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    "invite-hook-room",
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("Enter(host) error = %v", err)
+	}
+	if _, err := arena.Enter(EnterRequest{
+		RoomCode:    "invite-hook-room",
+		ClientToken: "guest-token",
+		JoinIntent:  JoinIntentPlayer,
+	}); err != nil {
+		t.Fatalf("Enter(guest) error = %v", err)
+	}
+	if err := arena.AssignSeat(hostView.Room.Code, hostView.Participant.ID, SeatAssignRequest{
+		Seat: SeatBlackPlayer,
+		Binding: AgentBinding{
+			RealType:    AgentTypePicoclaw,
+			Name:        "托管黑方",
+			PublicAlias: "黑雨伞",
+			Connection:  "managed",
+			BaseURL:     "http://127.0.0.1:19999",
+		},
+	}); err != nil {
+		t.Fatalf("AssignSeat() error = %v", err)
+	}
+
+	hostRoom, err := arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() error = %v", err)
+	}
+	participantID := hostRoom.Room.Seats[SeatBlackPlayer].ParticipantID
+	if participantID == "" {
+		t.Fatalf("expected managed picoclaw participant on black seat")
+	}
+
+	var hookCalled bool
+	arena.requestInvite = func(roomCode string, participant *Participant) (string, error) {
+		hookCalled = true
+		if roomCode != hostView.Room.Code {
+			t.Fatalf("expected room code %q, got %q", hostView.Room.Code, roomCode)
+		}
+		if participant == nil || participant.ID != participantID {
+			t.Fatalf("expected participant id %q, got %#v", participantID, participant)
+		}
+		return "hook-invite-ok", nil
+	}
+
+	reply, err := arena.InvitePicoclaw(hostView.Room.Code, hostView.Participant.ID, participantID)
+	if err != nil {
+		t.Fatalf("InvitePicoclaw() error = %v", err)
+	}
+	if !hookCalled {
+		t.Fatalf("expected requestInvite hook to be called")
+	}
+	if reply != "hook-invite-ok" {
+		t.Fatalf("expected hook reply hook-invite-ok, got %q", reply)
+	}
+}
+
+func TestInvitePicoclawRecordsFailureStatusFromMessageError(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+	defer arena.Close()
+
+	messageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/message" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		http.Error(w, "upstream bad gateway", http.StatusBadGateway)
+	}))
+	defer messageServer.Close()
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    "invite-error-room",
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("Enter(host) error = %v", err)
+	}
+	if _, err := arena.Enter(EnterRequest{
+		RoomCode:    "invite-error-room",
+		ClientToken: "guest-token",
+		JoinIntent:  JoinIntentPlayer,
+	}); err != nil {
+		t.Fatalf("Enter(guest) error = %v", err)
+	}
+	if err := arena.AssignSeat(hostView.Room.Code, hostView.Participant.ID, SeatAssignRequest{
+		Seat: SeatBlackPlayer,
+		Binding: AgentBinding{
+			RealType:    AgentTypePicoclaw,
+			Name:        "托管黑方",
+			PublicAlias: "黑雨伞",
+			Connection:  "managed",
+			BaseURL:     messageServer.URL,
+		},
+	}); err != nil {
+		t.Fatalf("AssignSeat() error = %v", err)
+	}
+
+	hostRoom, err := arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() error = %v", err)
+	}
+	participantID := hostRoom.Room.Seats[SeatBlackPlayer].ParticipantID
+	if participantID == "" {
+		t.Fatalf("expected managed picoclaw participant on black seat")
+	}
+
+	if _, err := arena.InvitePicoclaw(hostView.Room.Code, hostView.Participant.ID, participantID); err == nil {
+		t.Fatalf("expected InvitePicoclaw() error")
+	}
+
+	hostRoom, err = arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() after invite error = %v", err)
+	}
+	runtime := hostRoom.Runtime[participantID]
+	if runtime.LastInviteAt.IsZero() {
+		t.Fatalf("expected runtime.last_invite_at to be set on failure")
+	}
+	if !strings.Contains(runtime.LastInviteStatus, "HTTP 502") {
+		t.Fatalf("expected runtime.last_invite_status to contain HTTP 502, got %q", runtime.LastInviteStatus)
+	}
+}
+
+func TestInvitePicoclawReturnsCombinedErrorWhenInviteAndSaveBothFail(t *testing.T) {
+	store := newFailOnDemandSnapshotStore()
+	arena := NewArena(store)
+	defer arena.Close()
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    "invite-combined-error-room",
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("Enter(host) error = %v", err)
+	}
+	if _, err := arena.Enter(EnterRequest{
+		RoomCode:    "invite-combined-error-room",
+		ClientToken: "guest-token",
+		JoinIntent:  JoinIntentPlayer,
+	}); err != nil {
+		t.Fatalf("Enter(guest) error = %v", err)
+	}
+	if err := arena.AssignSeat(hostView.Room.Code, hostView.Participant.ID, SeatAssignRequest{
+		Seat: SeatBlackPlayer,
+		Binding: AgentBinding{
+			RealType:    AgentTypePicoclaw,
+			Name:        "托管黑方",
+			PublicAlias: "黑雨伞",
+			Connection:  "managed",
+			BaseURL:     "http://127.0.0.1:19999",
+		},
+	}); err != nil {
+		t.Fatalf("AssignSeat() error = %v", err)
+	}
+
+	hostRoom, err := arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() error = %v", err)
+	}
+	participantID := hostRoom.Room.Seats[SeatBlackPlayer].ParticipantID
+	if participantID == "" {
+		t.Fatalf("expected managed picoclaw participant on black seat")
+	}
+
+	arena.requestInvite = func(roomCode string, participant *Participant) (string, error) {
+		return "", errors.New("invite failed")
+	}
+	store.fail = true
+
+	if _, err := arena.InvitePicoclaw(hostView.Room.Code, hostView.Participant.ID, participantID); err == nil {
+		t.Fatalf("expected InvitePicoclaw() to fail")
+	} else {
+		if !strings.Contains(err.Error(), "invite failed") {
+			t.Fatalf("expected combined error to include invite failure, got %q", err.Error())
+		}
+		if !strings.Contains(err.Error(), "save failed") {
+			t.Fatalf("expected combined error to include save failure, got %q", err.Error())
+		}
 	}
 }
 
