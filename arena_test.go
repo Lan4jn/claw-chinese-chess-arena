@@ -638,7 +638,7 @@ func TestArenaAdvanceOnceFallsBackFromSessionToMessage(t *testing.T) {
 		t.Fatalf("HeartbeatPicoclawSession() error = %v", err)
 	}
 
-	time.Sleep(3 * time.Millisecond)
+	forceRoomReadyForAdvance(t, arena, hostView.Room.Code)
 	if err := arena.AdvanceOnce(); err != nil {
 		t.Fatalf("AdvanceOnce() error = %v", err)
 	}
@@ -759,7 +759,7 @@ func TestArenaPausesOnlyAfterSessionAndMessageBothFail(t *testing.T) {
 		t.Fatalf("HeartbeatPicoclawSession() error = %v", err)
 	}
 
-	time.Sleep(3 * time.Millisecond)
+	forceRoomReadyForAdvance(t, arena, hostView.Room.Code)
 	if err := arena.AdvanceOnce(); err != nil {
 		t.Fatalf("AdvanceOnce() error = %v", err)
 	}
