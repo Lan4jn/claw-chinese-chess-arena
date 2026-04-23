@@ -6,8 +6,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 type JoinIntent string
@@ -74,21 +72,22 @@ type Seat struct {
 }
 
 type ArenaRoom struct {
-	Code              string             `json:"code"`
-	OwnerToken        string             `json:"-"`
-	HostParticipantID string             `json:"host_participant_id"`
-	Status            ArenaRoomStatus    `json:"status"`
-	StepIntervalMS    int                `json:"step_interval_ms"`
-	RevealState       RevealState        `json:"reveal_state"`
-	RevealRed         bool               `json:"reveal_red"`
-	RevealBlack       bool               `json:"reveal_black"`
-	DefaultView       string             `json:"default_view"`
-	CreatedAt         time.Time          `json:"created_at"`
-	UpdatedAt         time.Time          `json:"updated_at"`
-	Participants      []*Participant     `json:"participants"`
-	Seats             map[SeatType]*Seat `json:"seats"`
-	ActiveMatch       *Match             `json:"active_match,omitempty"`
-	NextActionAt      time.Time          `json:"next_action_at,omitempty"`
+	Code              string                          `json:"code"`
+	OwnerToken        string                          `json:"-"`
+	HostParticipantID string                          `json:"host_participant_id"`
+	Status            ArenaRoomStatus                 `json:"status"`
+	StepIntervalMS    int                             `json:"step_interval_ms"`
+	RevealState       RevealState                     `json:"reveal_state"`
+	RevealRed         bool                            `json:"reveal_red"`
+	RevealBlack       bool                            `json:"reveal_black"`
+	DefaultView       string                          `json:"default_view"`
+	CreatedAt         time.Time                       `json:"created_at"`
+	UpdatedAt         time.Time                       `json:"updated_at"`
+	Participants      []*Participant                  `json:"participants"`
+	Seats             map[SeatType]*Seat              `json:"seats"`
+	PicoclawRuntime   map[string]PicoclawRuntimeState `json:"picoclaw_runtime,omitempty"`
+	ActiveMatch       *Match                          `json:"active_match,omitempty"`
+	NextActionAt      time.Time                       `json:"next_action_at,omitempty"`
 }
 
 type EnterRequest struct {
@@ -133,9 +132,10 @@ type HostParticipantView struct {
 }
 
 type HostRoomView struct {
-	IsHost       bool                  `json:"is_host"`
-	Room         PublicRoom            `json:"room"`
-	Participants []HostParticipantView `json:"participants"`
+	IsHost       bool                            `json:"is_host"`
+	Room         PublicRoom                      `json:"room"`
+	Participants []HostParticipantView           `json:"participants"`
+	Runtime      map[string]PicoclawRuntimeState `json:"runtime,omitempty"`
 }
 
 type AgentBinding struct {
@@ -166,26 +166,22 @@ type AgentRegisterRequest struct {
 }
 
 type PublicMatchView struct {
-	RoomCode            string            `json:"room_code"`
-	RoomStatus          ArenaRoomStatus   `json:"room_status"`
-	StepIntervalMS      int               `json:"step_interval_ms"`
-	Turn                Side              `json:"turn"`
-	LastMove            string            `json:"last_move,omitempty"`
-	BoardRows           []string          `json:"board_rows"`
-	BoardText           string            `json:"board_text"`
-	Status              string            `json:"status"`
-	Reason              string            `json:"reason,omitempty"`
-	Winner              Side              `json:"winner,omitempty"`
-	MoveCount           int               `json:"move_count"`
-	NextActionAt        time.Time         `json:"next_action_at,omitempty"`
-	Seats               map[SeatType]Seat `json:"seats"`
-	Logs                []MatchLogView    `json:"logs"`
-	LegalMoves          []string          `json:"legal_moves"`
-	Phase               string            `json:"phase"`
-	TransportMode       string            `json:"transport_mode,omitempty"`
-	TransportActiveMode string            `json:"transport_active_mode,omitempty"`
-	TransportState      string            `json:"transport_state,omitempty"`
-	TransportReason     string            `json:"transport_reason,omitempty"`
+	RoomCode       string            `json:"room_code"`
+	RoomStatus     ArenaRoomStatus   `json:"room_status"`
+	StepIntervalMS int               `json:"step_interval_ms"`
+	Turn           Side              `json:"turn"`
+	LastMove       string            `json:"last_move,omitempty"`
+	BoardRows      []string          `json:"board_rows"`
+	BoardText      string            `json:"board_text"`
+	Status         string            `json:"status"`
+	Reason         string            `json:"reason,omitempty"`
+	Winner         Side              `json:"winner,omitempty"`
+	MoveCount      int               `json:"move_count"`
+	NextActionAt   time.Time         `json:"next_action_at,omitempty"`
+	Seats          map[SeatType]Seat `json:"seats"`
+	Logs           []MatchLogView    `json:"logs"`
+	LegalMoves     []string          `json:"legal_moves"`
+	Phase          string            `json:"phase"`
 }
 
 type MatchLogView struct {
@@ -202,23 +198,18 @@ type HostMatchView struct {
 }
 
 type Arena struct {
-	mu              sync.Mutex
-	store           SnapshotStore
-	rooms           map[string]*ArenaRoom
-	transportConfig ServiceTransportConfig
-	wsMu            sync.Mutex
-	wsConns         map[string]*websocket.Conn
-	requestMove     func(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error)
-	ticker          *time.Ticker
-	done            chan struct{}
+	mu          sync.Mutex
+	store       SnapshotStore
+	rooms       map[string]*ArenaRoom
+	requestMove func(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error)
+	ticker      *time.Ticker
+	done        chan struct{}
 }
 
 func NewArena(store SnapshotStore) *Arena {
 	a := &Arena{
-		store:           store,
-		rooms:           make(map[string]*ArenaRoom),
-		transportConfig: defaultServiceTransportConfig(),
-		wsConns:         make(map[string]*websocket.Conn),
+		store: store,
+		rooms: make(map[string]*ArenaRoom),
 		requestMove: func(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
@@ -229,10 +220,6 @@ func NewArena(store SnapshotStore) *Arena {
 	}
 	if store != nil {
 		if snapshot, err := store.Load(); err == nil && snapshot != nil {
-			if snapshot.ServiceTransport.DefaultMode == "" {
-				snapshot.ServiceTransport = defaultServiceTransportConfig()
-			}
-			a.transportConfig = snapshot.ServiceTransport
 			for _, room := range snapshot.Rooms {
 				a.rooms[room.Code] = room
 			}
@@ -245,7 +232,6 @@ func NewArena(store SnapshotStore) *Arena {
 func (a *Arena) Close() {
 	close(a.done)
 	a.ticker.Stop()
-	a.closeAllWebSocketConns()
 }
 
 func (a *Arena) Enter(req EnterRequest) (ArenaEnterView, error) {
@@ -351,8 +337,9 @@ func (a *Arena) HostRoom(code string, requester string) (HostRoomView, error) {
 		return HostRoomView{}, err
 	}
 	view := HostRoomView{
-		IsHost: true,
-		Room:   buildPublicRoom(room, true),
+		IsHost:  true,
+		Room:    buildPublicRoom(room, true),
+		Runtime: clonePicoclawRuntime(room.PicoclawRuntime),
 	}
 	for _, participant := range room.Participants {
 		view.Participants = append(view.Participants, HostParticipantView{
@@ -612,15 +599,16 @@ func (a *Arena) StartMatch(code string, hostParticipantID string) (PublicMatchVi
 		SideRed:   red.ID,
 		SideBlack: black.ID,
 	}
+	if err := validateManagedPlayer(players[SideRed]); err != nil {
+		return PublicMatchView{}, fmt.Errorf("red player: %w", err)
+	}
+	if err := validateManagedPlayer(players[SideBlack]); err != nil {
+		return PublicMatchView{}, fmt.Errorf("black player: %w", err)
+	}
 	match, err := NewMatch(room.Code, room.StepIntervalMS, players, aliases, participants)
 	if err != nil {
 		return PublicMatchView{}, err
 	}
-	match.TransportMode = a.transportConfig.DefaultMode
-	match.TransportActiveMode = a.transportConfig.DefaultMode
-	match.TransportState = MatchTransportStatePending
-	match.TransportConfigVersionAtStart = a.transportConfig.ConfigVersion
-	match.TransportSince = time.Now()
 	room.ActiveMatch = match
 	room.Status = RoomStatusPlaying
 	scheduleNextAction(room)
@@ -629,32 +617,6 @@ func (a *Arena) StartMatch(code string, hostParticipantID string) (PublicMatchVi
 		return PublicMatchView{}, err
 	}
 	return buildPublicMatchView(room), nil
-}
-
-func (a *Arena) SetTransportDefaultMode(mode TransportMode) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	switch mode {
-	case TransportModeHTTPSession, TransportModeWebSocket:
-	default:
-		return fmt.Errorf("unsupported transport mode")
-	}
-
-	if a.transportConfig.DefaultMode == mode {
-		return nil
-	}
-
-	a.transportConfig.DefaultMode = mode
-	a.transportConfig.ConfigVersion++
-	a.transportConfig.UpdatedAt = time.Now()
-	return a.saveLocked()
-}
-
-func (a *Arena) TransportConfig() TransportConfigView {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return buildTransportConfigView(a.transportConfig)
 }
 
 func (a *Arena) PublicMatch(code string) (PublicMatchView, error) {
@@ -763,8 +725,7 @@ func (a *Arena) saveLocked() error {
 		return nil
 	}
 	snapshot := &ArenaSnapshot{
-		ServiceTransport: a.transportConfig,
-		Rooms:            make([]*ArenaRoom, 0, len(a.rooms)),
+		Rooms: make([]*ArenaRoom, 0, len(a.rooms)),
 	}
 	for _, room := range a.rooms {
 		snapshot.Rooms = append(snapshot.Rooms, room)
@@ -848,6 +809,7 @@ func syncSeats(room *ArenaRoom) {
 			seat.RealType = participant.RealType
 		}
 	}
+	reconcilePicoclawRuntime(room)
 }
 
 func buildPublicRoom(room *ArenaRoom, includeHost bool) PublicRoom {
@@ -884,26 +846,22 @@ func buildPublicMatchView(room *ArenaRoom) PublicMatchView {
 		seats[seatType] = *seat
 	}
 	return PublicMatchView{
-		RoomCode:            room.Code,
-		RoomStatus:          room.Status,
-		StepIntervalMS:      room.StepIntervalMS,
-		Turn:                match.State.Side,
-		LastMove:            match.State.LastMove,
-		BoardRows:           BoardRows(match.State.Board),
-		BoardText:           BoardText(match.State.Board),
-		Status:              match.State.Status,
-		Reason:              match.State.Reason,
-		Winner:              match.State.Winner,
-		MoveCount:           match.State.MoveCount,
-		NextActionAt:        room.NextActionAt,
-		Seats:               seats,
-		Logs:                buildLogViews(match.Logs, false),
-		LegalMoves:          match.LegalMoves(),
-		Phase:               matchPhase(room),
-		TransportMode:       string(match.TransportMode),
-		TransportActiveMode: string(match.TransportActiveMode),
-		TransportState:      string(match.TransportState),
-		TransportReason:     match.TransportReason,
+		RoomCode:       room.Code,
+		RoomStatus:     room.Status,
+		StepIntervalMS: room.StepIntervalMS,
+		Turn:           match.State.Side,
+		LastMove:       match.State.LastMove,
+		BoardRows:      BoardRows(match.State.Board),
+		BoardText:      BoardText(match.State.Board),
+		Status:         match.State.Status,
+		Reason:         match.State.Reason,
+		Winner:         match.State.Winner,
+		MoveCount:      match.State.MoveCount,
+		NextActionAt:   room.NextActionAt,
+		Seats:          seats,
+		Logs:           buildLogViews(match.Logs, false),
+		LegalMoves:     match.LegalMoves(),
+		Phase:          matchPhase(room),
 	}
 }
 
@@ -946,61 +904,9 @@ func (a *Arena) advanceRoom(code string) error {
 	legal := match.LegalMoves()
 	side := state.Side
 	matchID := match.ID
-	transportMode := match.TransportActiveMode
 	a.mu.Unlock()
 
-	var move, reply string
-	var err error
-	var degraded bool
-	var transportReason string
-
-	switch transportMode {
-	case TransportModeHTTPSession:
-		if strings.TrimSpace(player.BaseURL) == "" {
-			move, reply, err = a.requestMove(matchID, player, state, legal, arenaState)
-		} else {
-			var resp AgentTurnResponse
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			resp, err = deliverHTTPSessionTurn(ctx, defaultHTTPClient(), match, room, player, arenaState)
-			cancel()
-			move = resp.Move
-			reply = resp.Reply
-			if err == nil && resp.TurnID != buildTurnID(match) {
-				err = fmt.Errorf("agent response turn_id mismatch")
-			}
-		}
-	case TransportModeWebSocket:
-		if strings.TrimSpace(player.BaseURL) == "" {
-			move, reply, err = a.requestMove(matchID, player, state, legal, arenaState)
-			break
-		}
-		var resp AgentTurnResponse
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		resp, err = a.deliverWebSocketTurn(ctx, match, room, player, arenaState)
-		cancel()
-		if err == nil && resp.TurnID != buildTurnID(match) {
-			err = fmt.Errorf("agent response turn_id mismatch")
-		}
-		if err == nil {
-			move = resp.Move
-			reply = resp.Reply
-			break
-		}
-
-		transportReason = err.Error()
-		resp, err = deliverHTTPSessionTurn(context.Background(), defaultHTTPClient(), match, room, player, arenaState)
-		if err == nil && resp.TurnID != buildTurnID(match) {
-			err = fmt.Errorf("agent response turn_id mismatch")
-		}
-		if err == nil {
-			move = resp.Move
-			reply = resp.Reply
-			degraded = true
-			break
-		}
-	default:
-		move, reply, err = a.requestMove(matchID, player, state, legal, arenaState)
-	}
+	move, reply, err := a.requestMove(matchID, player, state, legal, arenaState)
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -1013,28 +919,14 @@ func (a *Arena) advanceRoom(code string) error {
 		match.AppendAgentError(side, reply, err)
 		room.Status = RoomStatusPaused
 		room.NextActionAt = time.Time{}
-		match.TransportState = MatchTransportStateFailed
-		match.TransportReason = err.Error()
 		room.UpdatedAt = time.Now()
 		return a.saveLocked()
 	}
 	if err := match.ApplyAgentMove(side, move, reply); err != nil {
 		room.Status = RoomStatusPaused
 		room.NextActionAt = time.Time{}
-		match.TransportState = MatchTransportStateFailed
-		match.TransportReason = err.Error()
 		room.UpdatedAt = time.Now()
 		return a.saveLocked()
-	}
-	if degraded {
-		match.TransportActiveMode = TransportModeHTTPSession
-		match.TransportState = MatchTransportStateDegraded
-		match.TransportReason = transportReason
-		match.TransportSince = time.Now()
-		match.appendLog(MatchLog{Time: time.Now(), Side: side, Message: "WebSocket 已降级为 HTTP session", Error: transportReason})
-	} else {
-		match.TransportState = MatchTransportStateActive
-		match.TransportReason = ""
 	}
 	if match.State.Status == "finished" {
 		room.Status = RoomStatusFinished
@@ -1107,12 +999,34 @@ func normalizeAgentType(kind string) string {
 	switch kind {
 	case "", AgentTypeHuman:
 		return AgentTypeHuman
-	case AgentTypePico:
-		return AgentTypePico
-	case AgentTypeClaw:
-		return AgentTypeClaw
+	case "pico", AgentTypePicoclaw:
+		return AgentTypePicoclaw
 	default:
 		return kind
+	}
+}
+
+func validateManagedType(kind string) error {
+	switch normalizeAgentType(kind) {
+	case AgentTypeHuman, AgentTypePicoclaw:
+		return nil
+	default:
+		return fmt.Errorf("other ai agent waiting for adaptation")
+	}
+}
+
+func validateManagedPlayer(player PlayerConfig) error {
+	player.Type = normalizeAgentType(player.Type)
+	switch player.Type {
+	case AgentTypeHuman:
+		return nil
+	case AgentTypePicoclaw:
+		if strings.TrimSpace(player.BaseURL) == "" {
+			return fmt.Errorf("picoclaw base_url is required")
+		}
+		return nil
+	default:
+		return fmt.Errorf("other ai agent waiting for adaptation")
 	}
 }
 
@@ -1127,6 +1041,9 @@ func (a *Arena) bindSeatLocked(room *ArenaRoom, seatType SeatType, binding Agent
 	seat, ok := room.Seats[seatType]
 	if !ok || seatType == SeatHost {
 		return fmt.Errorf("seat not found")
+	}
+	if err := validateManagedType(binding.RealType); err != nil {
+		return err
 	}
 	participant := findParticipantByID(room, seat.ParticipantID)
 	if participant != nil && participant.Connection != "managed" {
@@ -1187,6 +1104,17 @@ func cloneSeats(room *ArenaRoom) map[SeatType]Seat {
 	return out
 }
 
+func clonePicoclawRuntime(runtime map[string]PicoclawRuntimeState) map[string]PicoclawRuntimeState {
+	if len(runtime) == 0 {
+		return nil
+	}
+	out := make(map[string]PicoclawRuntimeState, len(runtime))
+	for participantID, state := range runtime {
+		out[participantID] = state
+	}
+	return out
+}
+
 func (a *Arena) updateParticipantBinding(code string, requester string, binding AgentBinding) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -1198,6 +1126,9 @@ func (a *Arena) updateParticipantBinding(code string, requester string, binding 
 	participant := findParticipantByToken(room, requester)
 	if participant == nil {
 		return fmt.Errorf("participant not found")
+	}
+	if err := validateManagedType(binding.RealType); err != nil {
+		return err
 	}
 	participant.RealType = normalizeAgentType(binding.RealType)
 	participant.DisplayName = strings.TrimSpace(binding.Name)
@@ -1212,6 +1143,49 @@ func (a *Arena) updateParticipantBinding(code string, requester string, binding 
 	room.UpdatedAt = time.Now()
 	syncSeats(room)
 	return a.saveLocked()
+}
+
+func ensurePicoclawRuntime(room *ArenaRoom, participant *Participant) {
+	if room.PicoclawRuntime == nil {
+		room.PicoclawRuntime = make(map[string]PicoclawRuntimeState)
+	}
+	if participant == nil || participant.ID == "" {
+		return
+	}
+	if participant.Connection != "managed" ||
+		normalizeAgentType(participant.RealType) != AgentTypePicoclaw ||
+		(participant.Seat != SeatRedPlayer && participant.Seat != SeatBlackPlayer) {
+		delete(room.PicoclawRuntime, participant.ID)
+		return
+	}
+	state, ok := room.PicoclawRuntime[participant.ID]
+	if !ok {
+		room.PicoclawRuntime[participant.ID] = newPicoclawRuntimeState(participant.ID)
+		return
+	}
+	state.ParticipantID = participant.ID
+	room.PicoclawRuntime[participant.ID] = state
+}
+
+func reconcilePicoclawRuntime(room *ArenaRoom) {
+	if room == nil {
+		return
+	}
+	keep := make(map[string]struct{})
+	for _, participant := range room.Participants {
+		if participant.Connection != "managed" ||
+			normalizeAgentType(participant.RealType) != AgentTypePicoclaw ||
+			(participant.Seat != SeatRedPlayer && participant.Seat != SeatBlackPlayer) {
+			continue
+		}
+		ensurePicoclawRuntime(room, participant)
+		keep[participant.ID] = struct{}{}
+	}
+	for participantID := range room.PicoclawRuntime {
+		if _, ok := keep[participantID]; !ok {
+			delete(room.PicoclawRuntime, participantID)
+		}
+	}
 }
 
 func currentRevealState(room *ArenaRoom) RevealState {

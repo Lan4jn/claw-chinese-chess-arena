@@ -1,0 +1,49 @@
+package main
+
+import "time"
+
+type PicoclawPreferredMode string
+type PicoclawActiveMode string
+type PicoclawSessionState string
+
+const (
+	PicoclawModeAuto          PicoclawPreferredMode = "auto"
+	PicoclawModePreferSession PicoclawPreferredMode = "prefer_session"
+	PicoclawModePreferMessage PicoclawPreferredMode = "prefer_message"
+)
+
+const (
+	PicoclawActiveModeSession PicoclawActiveMode = "session"
+	PicoclawActiveModeMessage PicoclawActiveMode = "message"
+)
+
+const (
+	PicoclawSessionStateIdle       PicoclawSessionState = "idle"
+	PicoclawSessionStateOpening    PicoclawSessionState = "opening"
+	PicoclawSessionStateActive     PicoclawSessionState = "active"
+	PicoclawSessionStateStale      PicoclawSessionState = "stale"
+	PicoclawSessionStateRecovering PicoclawSessionState = "recovering"
+	PicoclawSessionStateClosed     PicoclawSessionState = "closed"
+)
+
+type PicoclawRuntimeState struct {
+	ParticipantID  string                `json:"participant_id"`
+	PreferredMode  PicoclawPreferredMode `json:"preferred_mode"`
+	ActiveMode     PicoclawActiveMode    `json:"active_mode"`
+	SessionState   PicoclawSessionState  `json:"session_state"`
+	SessionID      string                `json:"session_id,omitempty"`
+	LeaseExpiresAt time.Time             `json:"lease_expires_at,omitempty"`
+}
+
+func newPicoclawRuntimeState(participantID string) PicoclawRuntimeState {
+	return PicoclawRuntimeState{
+		ParticipantID: participantID,
+		PreferredMode: PicoclawModeAuto,
+		ActiveMode:    PicoclawActiveModeMessage,
+		SessionState:  PicoclawSessionStateIdle,
+	}
+}
+
+func (s PicoclawRuntimeState) SessionHealthy(now time.Time) bool {
+	return s.SessionState == PicoclawSessionStateActive && !s.LeaseExpiresAt.IsZero() && now.Before(s.LeaseExpiresAt)
+}

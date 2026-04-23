@@ -13,8 +13,7 @@ type SnapshotStore interface {
 }
 
 type ArenaSnapshot struct {
-	ServiceTransport ServiceTransportConfig `json:"service_transport"`
-	Rooms            []*ArenaRoom           `json:"rooms"`
+	Rooms []*ArenaRoom `json:"rooms"`
 }
 
 type MemorySnapshotStore struct {
@@ -37,6 +36,7 @@ func (m *MemorySnapshotStore) Load() (*ArenaSnapshot, error) {
 	if err := json.Unmarshal(data, &cp); err != nil {
 		return nil, err
 	}
+	normalizeSnapshot(&cp)
 	return &cp, nil
 }
 
@@ -49,6 +49,7 @@ func (m *MemorySnapshotStore) Save(snapshot *ArenaSnapshot) error {
 	if err := json.Unmarshal(data, &cp); err != nil {
 		return err
 	}
+	normalizeSnapshot(&cp)
 	m.snapshot = &cp
 	return nil
 }
@@ -76,6 +77,7 @@ func (f *FileSnapshotStore) Load() (*ArenaSnapshot, error) {
 	if err := json.Unmarshal(data, &snapshot); err != nil {
 		return nil, err
 	}
+	normalizeSnapshot(&snapshot)
 	return &snapshot, nil
 }
 
@@ -92,4 +94,13 @@ func (f *FileSnapshotStore) Save(snapshot *ArenaSnapshot) error {
 		return err
 	}
 	return os.Rename(tmp, f.path)
+}
+
+func normalizeSnapshot(snapshot *ArenaSnapshot) {
+	if snapshot == nil {
+		return
+	}
+	for _, room := range snapshot.Rooms {
+		reconcilePicoclawRuntime(room)
+	}
 }

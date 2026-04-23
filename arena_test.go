@@ -1,14 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 func TestArenaEnterCreatesRoomAndAssignsHost(t *testing.T) {
@@ -97,7 +96,7 @@ func TestArenaPublicViewHidesIdentityUntilReveal(t *testing.T) {
 	}
 
 	if err := arena.BindSeatAgent(hostView.Room.Code, hostView.Participant.ID, SeatRedPlayer, AgentBinding{
-		RealType: AgentTypePico,
+		RealType: AgentTypePicoclaw,
 		Name:     "本地 Pico",
 	}); err != nil {
 		t.Fatalf("bind red error = %v", err)
@@ -124,7 +123,7 @@ func TestArenaPublicViewHidesIdentityUntilReveal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PublicRoom() after reveal error = %v", err)
 	}
-	if publicView.Seats[SeatRedPlayer].RealType != AgentTypePico {
+	if publicView.Seats[SeatRedPlayer].RealType != AgentTypePicoclaw {
 		t.Fatalf("expected red type to be revealed, got %q", publicView.Seats[SeatRedPlayer].RealType)
 	}
 	if publicView.Seats[SeatBlackPlayer].RealType != AgentTypeHuman {
@@ -138,7 +137,7 @@ func TestArenaPublicViewHidesIdentityUntilReveal(t *testing.T) {
 
 func TestBuildMovePromptIncludesArenaRules(t *testing.T) {
 	player := PlayerConfig{
-		Type:    AgentTypePico,
+		Type:    AgentTypePicoclaw,
 		Name:    "台灯",
 		BaseURL: "http://localhost:8081",
 	}
@@ -310,8 +309,9 @@ func TestArenaAdvanceOnceRequestsAgentMoveOnAgentTurn(t *testing.T) {
 		t.Fatalf("guest enter error = %v", err)
 	}
 	if err := arena.BindSeatAgent(hostView.Room.Code, hostView.Participant.ID, SeatBlackPlayer, AgentBinding{
-		RealType: AgentTypePico,
+		RealType: AgentTypePicoclaw,
 		Name:     "远程 Pico",
+		BaseURL:  "http://127.0.0.1:9001",
 	}); err != nil {
 		t.Fatalf("BindSeatAgent() error = %v", err)
 	}
@@ -394,7 +394,7 @@ func TestAssignSeatBindingDoesNotOverwriteExistingHumanParticipant(t *testing.T)
 	if err := arena.AssignSeat(hostView.Room.Code, hostView.Participant.ID, SeatAssignRequest{
 		Seat: SeatBlackPlayer,
 		Binding: AgentBinding{
-			RealType:    AgentTypePico,
+			RealType:    AgentTypePicoclaw,
 			Name:        "托管 Pico",
 			PublicAlias: "黑雨伞",
 			Connection:  "managed",
@@ -426,8 +426,8 @@ func TestAssignSeatBindingDoesNotOverwriteExistingHumanParticipant(t *testing.T)
 			}
 		case hostRoom.Room.Seats[SeatBlackPlayer].ParticipantID:
 			managedSeen = true
-			if participant.RealType != AgentTypePico {
-				t.Fatalf("expected managed participant to be pico, got %q", participant.RealType)
+			if participant.RealType != AgentTypePicoclaw {
+				t.Fatalf("expected managed participant to be picoclaw, got %q", participant.RealType)
 			}
 			if participant.Seat != SeatBlackPlayer {
 				t.Fatalf("expected managed participant to occupy black seat, got %q", participant.Seat)
@@ -442,117 +442,30 @@ func TestAssignSeatBindingDoesNotOverwriteExistingHumanParticipant(t *testing.T)
 	}
 }
 
-func TestArenaStartMatchCapturesCurrentTransportMode(t *testing.T) {
-	arena := NewArena(NewMemorySnapshotStore())
-	defer arena.Close()
-
-	hostView, err := arena.Enter(EnterRequest{
-		RoomCode:    "transport-room",
-		ClientToken: "host-token",
-		JoinIntent:  JoinIntentPlayer,
-	})
-	if err != nil {
-		t.Fatalf("Enter(host) error = %v", err)
-	}
-	if _, err := arena.Enter(EnterRequest{
-		RoomCode:    "transport-room",
-		ClientToken: "guest-token",
-		JoinIntent:  JoinIntentPlayer,
-	}); err != nil {
-		t.Fatalf("Enter(guest) error = %v", err)
-	}
-
-	if err := arena.SetTransportDefaultMode(TransportModeWebSocket); err != nil {
-		t.Fatalf("SetTransportDefaultMode(websocket) error = %v", err)
-	}
-
-	matchView, err := arena.StartMatch(hostView.Room.Code, hostView.Participant.ID)
-	if err != nil {
-		t.Fatalf("StartMatch() error = %v", err)
-	}
-	if matchView.TransportMode != string(TransportModeWebSocket) {
-		t.Fatalf("expected transport mode websocket, got %q", matchView.TransportMode)
-	}
-	if matchView.TransportActiveMode != string(TransportModeWebSocket) {
-		t.Fatalf("expected active transport mode websocket, got %q", matchView.TransportActiveMode)
-	}
-	if matchView.TransportState != string(MatchTransportStatePending) && matchView.TransportState != string(MatchTransportStateActive) {
-		t.Fatalf("expected transport state pending or active, got %q", matchView.TransportState)
-	}
-}
-
-func TestArenaTransportSwitchDoesNotRewriteActiveMatch(t *testing.T) {
-	arena := NewArena(NewMemorySnapshotStore())
-	defer arena.Close()
-
-	hostView, err := arena.Enter(EnterRequest{
-		RoomCode:    "transport-switch-room",
-		ClientToken: "host-token",
-		JoinIntent:  JoinIntentPlayer,
-	})
-	if err != nil {
-		t.Fatalf("Enter(host) error = %v", err)
-	}
-	if _, err := arena.Enter(EnterRequest{
-		RoomCode:    "transport-switch-room",
-		ClientToken: "guest-token",
-		JoinIntent:  JoinIntentPlayer,
-	}); err != nil {
-		t.Fatalf("Enter(guest) error = %v", err)
-	}
-
-	if _, err := arena.StartMatch(hostView.Room.Code, hostView.Participant.ID); err != nil {
-		t.Fatalf("StartMatch() error = %v", err)
-	}
-	if err := arena.SetTransportDefaultMode(TransportModeWebSocket); err != nil {
-		t.Fatalf("SetTransportDefaultMode(websocket) error = %v", err)
-	}
-
-	hostMatch, err := arena.HostMatch(hostView.Room.Code, hostView.Participant.ID)
-	if err != nil {
-		t.Fatalf("HostMatch() error = %v", err)
-	}
-	if hostMatch.TransportMode != string(TransportModeHTTPSession) {
-		t.Fatalf("expected running match to keep http_session, got %q", hostMatch.TransportMode)
-	}
-	if hostMatch.TransportActiveMode != string(TransportModeHTTPSession) {
-		t.Fatalf("expected active mode http_session, got %q", hostMatch.TransportActiveMode)
-	}
-}
-
-func TestArenaAdvanceOnceUsesHTTPSessionTransportForManagedSeat(t *testing.T) {
+func TestArenaAdvanceOnceUsesPicoclawMessageTransportForManagedSeat(t *testing.T) {
 	store := NewMemorySnapshotStore()
 	arena := NewArena(store)
 	defer arena.Close()
 
-	var opened bool
-	var receivedTurn AgentTurnRequest
-	sessionServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/session/open":
-			opened = true
-			writeJSON(w, http.StatusOK, map[string]any{
-				"session_id":       "sess-1",
-				"resume_token":     "resume-1",
-				"lease_ttl_ms":     30000,
-				"connection_state": "connected",
-			})
-		case "/session/turn":
-			if err := json.NewDecoder(r.Body).Decode(&receivedTurn); err != nil {
-				t.Fatalf("Decode() turn request error = %v", err)
-			}
-			writeJSON(w, http.StatusOK, AgentTurnResponse{
-				TurnID:     receivedTurn.TurnID,
-				Move:       "a3-a4",
-				Reply:      "MOVE: a3-a4",
-				AgentState: "ok",
-				SessionID:  "sess-1",
-			})
-		default:
+	var received picoMessageRequest
+	arena.requestMove = func(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
+		move, reply, req, err := askPicoclawForMoveWithRequest(context.Background(), defaultHTTPClient(), matchID, player, state, legal, arenaState)
+		received = req
+		return move, reply, err
+	}
+
+	messageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/message" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
+		if err := json.NewDecoder(r.Body).Decode(&received); err != nil {
+			t.Fatalf("Decode() message request error = %v", err)
+		}
+		writeJSON(w, http.StatusOK, picoMessageResponse{
+			Reply: "MOVE: a3-a4",
+		})
 	}))
-	defer sessionServer.Close()
+	defer messageServer.Close()
 
 	hostView, err := arena.Enter(EnterRequest{
 		RoomCode:    "http-session-room",
@@ -572,11 +485,11 @@ func TestArenaAdvanceOnceUsesHTTPSessionTransportForManagedSeat(t *testing.T) {
 	if err := arena.AssignSeat(hostView.Room.Code, hostView.Participant.ID, SeatAssignRequest{
 		Seat: SeatBlackPlayer,
 		Binding: AgentBinding{
-			RealType:    AgentTypePico,
+			RealType:    AgentTypePicoclaw,
 			Name:        "托管黑方",
 			PublicAlias: "黑雨伞",
 			Connection:  "managed",
-			BaseURL:     sessionServer.URL,
+			BaseURL:     messageServer.URL,
 		},
 	}); err != nil {
 		t.Fatalf("AssignSeat() error = %v", err)
@@ -598,17 +511,14 @@ func TestArenaAdvanceOnceUsesHTTPSessionTransportForManagedSeat(t *testing.T) {
 		t.Fatalf("AdvanceOnce() error = %v", err)
 	}
 
-	if !opened {
-		t.Fatalf("expected HTTP session to be opened")
+	if received.SessionID == "" {
+		t.Fatalf("expected message request to include session_id")
 	}
-	if receivedTurn.TurnID == "" {
-		t.Fatalf("expected turn request to include turn_id")
+	if received.SenderID != "picoclaw-xiangqi-arena" {
+		t.Fatalf("expected sender_id picoclaw-xiangqi-arena, got %q", received.SenderID)
 	}
-	if receivedTurn.MatchID == "" {
-		t.Fatalf("expected turn request to include match_id")
-	}
-	if len(receivedTurn.LegalMoves) == 0 {
-		t.Fatalf("expected turn request to include legal_moves")
+	if !strings.Contains(received.Message, "只能从下面合法走法中选择一个") {
+		t.Fatalf("expected prompt to include legal move guidance, got %q", received.Message)
 	}
 
 	matchView, err := arena.PublicMatch(hostView.Room.Code)
@@ -616,47 +526,16 @@ func TestArenaAdvanceOnceUsesHTTPSessionTransportForManagedSeat(t *testing.T) {
 		t.Fatalf("PublicMatch() error = %v", err)
 	}
 	if matchView.LastMove != "a3-a4" {
-		t.Fatalf("expected http session move a3-a4, got %q", matchView.LastMove)
-	}
-	if matchView.TransportActiveMode != string(TransportModeHTTPSession) {
-		t.Fatalf("expected active transport mode http_session, got %q", matchView.TransportActiveMode)
+		t.Fatalf("expected picoclaw move a3-a4, got %q", matchView.LastMove)
 	}
 }
 
-func TestArenaAdvanceOnceUsesWebSocketTransportWhenAvailable(t *testing.T) {
-	store := NewMemorySnapshotStore()
-	arena := NewArena(store)
+func TestArenaStartMatchRejectsUnsupportedAIAgentType(t *testing.T) {
+	arena := NewArena(NewMemorySnapshotStore())
 	defer arena.Close()
 
-	upgrader := websocket.Upgrader{}
-	var receivedTurn AgentTurnRequest
-	wsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/ws" {
-			http.NotFound(w, r)
-			return
-		}
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Fatalf("Upgrade() error = %v", err)
-		}
-		defer conn.Close()
-
-		if err := conn.ReadJSON(&receivedTurn); err != nil {
-			t.Fatalf("ReadJSON() error = %v", err)
-		}
-		if err := conn.WriteJSON(AgentTurnResponse{
-			TurnID:     receivedTurn.TurnID,
-			Move:       "a3-a4",
-			Reply:      "MOVE: a3-a4",
-			AgentState: "ok",
-		}); err != nil {
-			t.Fatalf("WriteJSON() error = %v", err)
-		}
-	}))
-	defer wsServer.Close()
-
 	hostView, err := arena.Enter(EnterRequest{
-		RoomCode:    "ws-room",
+		RoomCode:    "unsupported-agent-room",
 		ClientToken: "host-token",
 		JoinIntent:  JoinIntentPlayer,
 	})
@@ -664,7 +543,100 @@ func TestArenaAdvanceOnceUsesWebSocketTransportWhenAvailable(t *testing.T) {
 		t.Fatalf("Enter(host) error = %v", err)
 	}
 	if _, err := arena.Enter(EnterRequest{
-		RoomCode:    "ws-room",
+		RoomCode:    "unsupported-agent-room",
+		ClientToken: "guest-token",
+		JoinIntent:  JoinIntentPlayer,
+	}); err != nil {
+		t.Fatalf("Enter(guest) error = %v", err)
+	}
+
+	if err := arena.AssignSeat(hostView.Room.Code, hostView.Participant.ID, SeatAssignRequest{
+		Seat: SeatBlackPlayer,
+		Binding: AgentBinding{
+			RealType:    "custom_agent",
+			Name:        "等待适配对象",
+			PublicAlias: "黑雨伞",
+			Connection:  "managed",
+			BaseURL:     "http://127.0.0.1:9001",
+		},
+	}); err == nil {
+		t.Fatalf("expected unsupported AI agent binding to fail")
+	}
+}
+
+func TestAssignSeatCreatesPicoclawRuntimeState(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+	defer arena.Close()
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    "runtime-room",
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("Enter(host) error = %v", err)
+	}
+	if _, err := arena.Enter(EnterRequest{
+		RoomCode:    "runtime-room",
+		ClientToken: "guest-token",
+		JoinIntent:  JoinIntentPlayer,
+	}); err != nil {
+		t.Fatalf("Enter(guest) error = %v", err)
+	}
+
+	if err := arena.AssignSeat(hostView.Room.Code, hostView.Participant.ID, SeatAssignRequest{
+		Seat: SeatBlackPlayer,
+		Binding: AgentBinding{
+			RealType:    AgentTypePicoclaw,
+			Name:        "黑方 Pico",
+			PublicAlias: "黑雨伞",
+			Connection:  "managed",
+			BaseURL:     "http://127.0.0.1:18888",
+		},
+	}); err != nil {
+		t.Fatalf("AssignSeat() error = %v", err)
+	}
+
+	hostRoom, err := arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() error = %v", err)
+	}
+
+	seat := hostRoom.Room.Seats[SeatBlackPlayer]
+	if seat.ParticipantID == "" {
+		t.Fatalf("expected black seat participant")
+	}
+	runtime := hostRoom.Runtime[seat.ParticipantID]
+	if runtime.ParticipantID != seat.ParticipantID {
+		t.Fatalf("expected runtime participant_id %q, got %q", seat.ParticipantID, runtime.ParticipantID)
+	}
+	if runtime.PreferredMode != PicoclawModeAuto {
+		t.Fatalf("expected preferred_mode auto, got %q", runtime.PreferredMode)
+	}
+	if runtime.ActiveMode != PicoclawActiveModeMessage {
+		t.Fatalf("expected active_mode message, got %q", runtime.ActiveMode)
+	}
+	if runtime.SessionState != PicoclawSessionStateIdle {
+		t.Fatalf("expected session_state idle, got %q", runtime.SessionState)
+	}
+}
+
+func TestSnapshotPersistsPicoclawRuntimeState(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+	defer arena.Close()
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    "runtime-snapshot-room",
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("Enter(host) error = %v", err)
+	}
+	if _, err := arena.Enter(EnterRequest{
+		RoomCode:    "runtime-snapshot-room",
 		ClientToken: "guest-token",
 		JoinIntent:  JoinIntentPlayer,
 	}); err != nil {
@@ -673,146 +645,25 @@ func TestArenaAdvanceOnceUsesWebSocketTransportWhenAvailable(t *testing.T) {
 	if err := arena.AssignSeat(hostView.Room.Code, hostView.Participant.ID, SeatAssignRequest{
 		Seat: SeatBlackPlayer,
 		Binding: AgentBinding{
-			RealType:    AgentTypePico,
-			Name:        "托管黑方",
+			RealType:    AgentTypePicoclaw,
+			Name:        "黑方 Pico",
 			PublicAlias: "黑雨伞",
 			Connection:  "managed",
-			BaseURL:     wsServer.URL,
+			BaseURL:     "http://127.0.0.1:18888",
 		},
 	}); err != nil {
 		t.Fatalf("AssignSeat() error = %v", err)
 	}
-	if err := arena.SetTransportDefaultMode(TransportModeWebSocket); err != nil {
-		t.Fatalf("SetTransportDefaultMode(websocket) error = %v", err)
-	}
-	if err := arena.UpdateSettings(hostView.Room.Code, hostView.Participant.ID, RoomSettingsRequest{
-		StepIntervalMS: 1,
-	}); err != nil {
-		t.Fatalf("UpdateSettings() error = %v", err)
-	}
-	if _, err := arena.StartMatch(hostView.Room.Code, hostView.Participant.ID); err != nil {
-		t.Fatalf("StartMatch() error = %v", err)
-	}
-	if _, err := arena.SubmitMove(hostView.Room.Code, "host-token", "a6-a5"); err != nil {
-		t.Fatalf("SubmitMove() error = %v", err)
-	}
 
-	time.Sleep(3 * time.Millisecond)
-	if err := arena.AdvanceOnce(); err != nil {
-		t.Fatalf("AdvanceOnce() error = %v", err)
-	}
+	reloaded := NewArena(store)
+	defer reloaded.Close()
 
-	matchView, err := arena.PublicMatch(hostView.Room.Code)
+	hostRoom, err := reloaded.HostRoom(hostView.Room.Code, hostView.Participant.ID)
 	if err != nil {
-		t.Fatalf("PublicMatch() error = %v", err)
+		t.Fatalf("HostRoom() after reload error = %v", err)
 	}
-	if receivedTurn.TurnID == "" {
-		t.Fatalf("expected websocket turn request to include turn_id")
-	}
-	if matchView.LastMove != "a3-a4" {
-		t.Fatalf("expected websocket move a3-a4, got %q", matchView.LastMove)
-	}
-	if matchView.TransportMode != string(TransportModeWebSocket) {
-		t.Fatalf("expected transport mode websocket, got %q", matchView.TransportMode)
-	}
-	if matchView.TransportActiveMode != string(TransportModeWebSocket) {
-		t.Fatalf("expected active transport mode websocket, got %q", matchView.TransportActiveMode)
-	}
-}
-
-func TestArenaAdvanceOnceDegradesWebSocketToHTTPSession(t *testing.T) {
-	store := NewMemorySnapshotStore()
-	arena := NewArena(store)
-	defer arena.Close()
-
-	httpFallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/session/open":
-			writeJSON(w, http.StatusOK, map[string]any{
-				"session_id":       "sess-2",
-				"resume_token":     "resume-2",
-				"lease_ttl_ms":     30000,
-				"connection_state": "connected",
-			})
-		case "/session/turn":
-			var req AgentTurnRequest
-			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-				t.Fatalf("Decode() turn request error = %v", err)
-			}
-			writeJSON(w, http.StatusOK, AgentTurnResponse{
-				TurnID:     req.TurnID,
-				Move:       "a3-a4",
-				Reply:      "MOVE: a3-a4",
-				AgentState: "ok",
-				SessionID:  "sess-2",
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer httpFallbackServer.Close()
-
-	hostView, err := arena.Enter(EnterRequest{
-		RoomCode:    "ws-fallback-room",
-		ClientToken: "host-token",
-		JoinIntent:  JoinIntentPlayer,
-	})
-	if err != nil {
-		t.Fatalf("Enter(host) error = %v", err)
-	}
-	if _, err := arena.Enter(EnterRequest{
-		RoomCode:    "ws-fallback-room",
-		ClientToken: "guest-token",
-		JoinIntent:  JoinIntentPlayer,
-	}); err != nil {
-		t.Fatalf("Enter(guest) error = %v", err)
-	}
-	if err := arena.AssignSeat(hostView.Room.Code, hostView.Participant.ID, SeatAssignRequest{
-		Seat: SeatBlackPlayer,
-		Binding: AgentBinding{
-			RealType:    AgentTypePico,
-			Name:        "托管黑方",
-			PublicAlias: "黑雨伞",
-			Connection:  "managed",
-			BaseURL:     httpFallbackServer.URL,
-		},
-	}); err != nil {
-		t.Fatalf("AssignSeat() error = %v", err)
-	}
-	if err := arena.SetTransportDefaultMode(TransportModeWebSocket); err != nil {
-		t.Fatalf("SetTransportDefaultMode(websocket) error = %v", err)
-	}
-	if err := arena.UpdateSettings(hostView.Room.Code, hostView.Participant.ID, RoomSettingsRequest{
-		StepIntervalMS: 1,
-	}); err != nil {
-		t.Fatalf("UpdateSettings() error = %v", err)
-	}
-	if _, err := arena.StartMatch(hostView.Room.Code, hostView.Participant.ID); err != nil {
-		t.Fatalf("StartMatch() error = %v", err)
-	}
-	if _, err := arena.SubmitMove(hostView.Room.Code, "host-token", "a6-a5"); err != nil {
-		t.Fatalf("SubmitMove() error = %v", err)
-	}
-
-	time.Sleep(3 * time.Millisecond)
-	if err := arena.AdvanceOnce(); err != nil {
-		t.Fatalf("AdvanceOnce() error = %v", err)
-	}
-
-	matchView, err := arena.PublicMatch(hostView.Room.Code)
-	if err != nil {
-		t.Fatalf("PublicMatch() error = %v", err)
-	}
-	if matchView.LastMove != "a3-a4" {
-		t.Fatalf("expected degraded fallback move a3-a4, got %q", matchView.LastMove)
-	}
-	if matchView.TransportMode != string(TransportModeWebSocket) {
-		t.Fatalf("expected configured transport mode websocket, got %q", matchView.TransportMode)
-	}
-	if matchView.TransportActiveMode != string(TransportModeHTTPSession) {
-		t.Fatalf("expected active mode to degrade to http_session, got %q", matchView.TransportActiveMode)
-	}
-	if matchView.TransportState != string(MatchTransportStateDegraded) && matchView.TransportState != string(MatchTransportStateActive) {
-		t.Fatalf("expected degraded or active transport state after fallback, got %q", matchView.TransportState)
+	seat := hostRoom.Room.Seats[SeatBlackPlayer]
+	if hostRoom.Runtime[seat.ParticipantID].ParticipantID == "" {
+		t.Fatalf("expected persisted runtime state for participant %q", seat.ParticipantID)
 	}
 }
