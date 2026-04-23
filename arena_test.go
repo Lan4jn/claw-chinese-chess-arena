@@ -553,6 +553,225 @@ func TestArenaAdvanceOnceUsesPicoclawMessageTransportForManagedSeat(t *testing.T
 	}
 }
 
+func TestArenaAdvanceOnceFallsBackFromSessionToMessage(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+	defer arena.Close()
+
+	callOrder := make([]string, 0, 2)
+	sessionCalls := 0
+	messageCalls := 0
+	arena.requestSessionMove = func(matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
+		sessionCalls++
+		callOrder = append(callOrder, "session")
+		return "", "session unavailable", errors.New("session unavailable")
+	}
+	arena.requestMove = func(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
+		messageCalls++
+		callOrder = append(callOrder, "message")
+		return "a3-a4", "MOVE: a3-a4", nil
+	}
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    "session-fallback-room",
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("Enter(host) error = %v", err)
+	}
+	if _, err := arena.Enter(EnterRequest{
+		RoomCode:    "session-fallback-room",
+		ClientToken: "guest-token",
+		JoinIntent:  JoinIntentPlayer,
+	}); err != nil {
+		t.Fatalf("Enter(guest) error = %v", err)
+	}
+	if err := arena.BindSeatAgent(hostView.Room.Code, hostView.Participant.ID, SeatBlackPlayer, AgentBinding{
+		RealType:    AgentTypePicoclaw,
+		Name:        "托管黑方",
+		PublicAlias: "黑雨伞",
+		Connection:  "managed",
+		BaseURL:     "http://127.0.0.1:9001",
+	}); err != nil {
+		t.Fatalf("BindSeatAgent() error = %v", err)
+	}
+	if err := arena.UpdateSettings(hostView.Room.Code, hostView.Participant.ID, RoomSettingsRequest{
+		StepIntervalMS: 1,
+	}); err != nil {
+		t.Fatalf("UpdateSettings() error = %v", err)
+	}
+	if _, err := arena.StartMatch(hostView.Room.Code, hostView.Participant.ID); err != nil {
+		t.Fatalf("StartMatch() error = %v", err)
+	}
+	if _, err := arena.SubmitMove(hostView.Room.Code, hostView.Participant.ID, "a6-a5"); err != nil {
+		t.Fatalf("SubmitMove() error = %v", err)
+	}
+
+	hostRoom, err := arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() error = %v", err)
+	}
+	participantID := hostRoom.Room.Seats[SeatBlackPlayer].ParticipantID
+	if participantID == "" {
+		t.Fatalf("expected managed participant on black seat")
+	}
+	if _, err := arena.SetPicoclawMode(hostView.Room.Code, hostView.Participant.ID, participantID, PicoclawModePreferSession); err != nil {
+		t.Fatalf("SetPicoclawMode() error = %v", err)
+	}
+	opened, err := arena.OpenPicoclawSession(hostView.Room.Code, hostView.Participant.ID, participantID)
+	if err != nil {
+		t.Fatalf("OpenPicoclawSession() error = %v", err)
+	}
+	if _, err := arena.HeartbeatPicoclawSession(hostView.Room.Code, participantID, opened.SessionID, 45*time.Second); err != nil {
+		t.Fatalf("HeartbeatPicoclawSession() error = %v", err)
+	}
+
+	time.Sleep(3 * time.Millisecond)
+	if err := arena.AdvanceOnce(); err != nil {
+		t.Fatalf("AdvanceOnce() error = %v", err)
+	}
+
+	if sessionCalls != 1 {
+		t.Fatalf("expected one session attempt, got %d", sessionCalls)
+	}
+	if messageCalls != 1 {
+		t.Fatalf("expected one message attempt, got %d", messageCalls)
+	}
+	if len(callOrder) != 2 || callOrder[0] != "session" || callOrder[1] != "message" {
+		t.Fatalf("expected attempt order [session message], got %v", callOrder)
+	}
+
+	matchView, err := arena.PublicMatch(hostView.Room.Code)
+	if err != nil {
+		t.Fatalf("PublicMatch() error = %v", err)
+	}
+	if matchView.LastMove != "a3-a4" {
+		t.Fatalf("expected fallback move a3-a4, got %q", matchView.LastMove)
+	}
+
+	publicRoom, err := arena.PublicRoom(hostView.Room.Code)
+	if err != nil {
+		t.Fatalf("PublicRoom() error = %v", err)
+	}
+	if publicRoom.Status != RoomStatusPlaying {
+		t.Fatalf("expected room to keep playing after fallback success, got %q", publicRoom.Status)
+	}
+
+	hostRoom, err = arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() after AdvanceOnce error = %v", err)
+	}
+	runtime := hostRoom.Runtime[participantID]
+	if runtime.ActiveMode != PicoclawActiveModeMessage {
+		t.Fatalf("expected runtime active_mode message after fallback, got %q", runtime.ActiveMode)
+	}
+	if runtime.LastModeSwitchAt.IsZero() {
+		t.Fatalf("expected runtime last_mode_switch_at to be updated on fallback")
+	}
+	if strings.TrimSpace(runtime.LastSwitchReason) == "" {
+		t.Fatalf("expected runtime last_switch_reason to be set on fallback")
+	}
+}
+
+func TestArenaPausesOnlyAfterSessionAndMessageBothFail(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+	defer arena.Close()
+
+	callOrder := make([]string, 0, 2)
+	sessionCalls := 0
+	messageCalls := 0
+	arena.requestSessionMove = func(matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
+		sessionCalls++
+		callOrder = append(callOrder, "session")
+		return "", "session failed", errors.New("session failed")
+	}
+	arena.requestMove = func(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
+		messageCalls++
+		callOrder = append(callOrder, "message")
+		return "", "message failed", errors.New("message failed")
+	}
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    "double-failure-room",
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("Enter(host) error = %v", err)
+	}
+	if _, err := arena.Enter(EnterRequest{
+		RoomCode:    "double-failure-room",
+		ClientToken: "guest-token",
+		JoinIntent:  JoinIntentPlayer,
+	}); err != nil {
+		t.Fatalf("Enter(guest) error = %v", err)
+	}
+	if err := arena.BindSeatAgent(hostView.Room.Code, hostView.Participant.ID, SeatBlackPlayer, AgentBinding{
+		RealType:    AgentTypePicoclaw,
+		Name:        "托管黑方",
+		PublicAlias: "黑雨伞",
+		Connection:  "managed",
+		BaseURL:     "http://127.0.0.1:9001",
+	}); err != nil {
+		t.Fatalf("BindSeatAgent() error = %v", err)
+	}
+	if err := arena.UpdateSettings(hostView.Room.Code, hostView.Participant.ID, RoomSettingsRequest{
+		StepIntervalMS: 1,
+	}); err != nil {
+		t.Fatalf("UpdateSettings() error = %v", err)
+	}
+	if _, err := arena.StartMatch(hostView.Room.Code, hostView.Participant.ID); err != nil {
+		t.Fatalf("StartMatch() error = %v", err)
+	}
+	if _, err := arena.SubmitMove(hostView.Room.Code, hostView.Participant.ID, "a6-a5"); err != nil {
+		t.Fatalf("SubmitMove() error = %v", err)
+	}
+
+	hostRoom, err := arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() error = %v", err)
+	}
+	participantID := hostRoom.Room.Seats[SeatBlackPlayer].ParticipantID
+	if participantID == "" {
+		t.Fatalf("expected managed participant on black seat")
+	}
+	if _, err := arena.SetPicoclawMode(hostView.Room.Code, hostView.Participant.ID, participantID, PicoclawModePreferSession); err != nil {
+		t.Fatalf("SetPicoclawMode() error = %v", err)
+	}
+	opened, err := arena.OpenPicoclawSession(hostView.Room.Code, hostView.Participant.ID, participantID)
+	if err != nil {
+		t.Fatalf("OpenPicoclawSession() error = %v", err)
+	}
+	if _, err := arena.HeartbeatPicoclawSession(hostView.Room.Code, participantID, opened.SessionID, 45*time.Second); err != nil {
+		t.Fatalf("HeartbeatPicoclawSession() error = %v", err)
+	}
+
+	time.Sleep(3 * time.Millisecond)
+	if err := arena.AdvanceOnce(); err != nil {
+		t.Fatalf("AdvanceOnce() error = %v", err)
+	}
+
+	if sessionCalls != 1 {
+		t.Fatalf("expected one session attempt, got %d", sessionCalls)
+	}
+	if messageCalls != 1 {
+		t.Fatalf("expected one message fallback attempt, got %d", messageCalls)
+	}
+	if len(callOrder) != 2 || callOrder[0] != "session" || callOrder[1] != "message" {
+		t.Fatalf("expected attempt order [session message], got %v", callOrder)
+	}
+
+	publicRoom, err := arena.PublicRoom(hostView.Room.Code)
+	if err != nil {
+		t.Fatalf("PublicRoom() error = %v", err)
+	}
+	if publicRoom.Status != RoomStatusPaused {
+		t.Fatalf("expected room paused after both attempts fail, got %q", publicRoom.Status)
+	}
+}
+
 func TestInvitePicoclawUsesMessageEndpoint(t *testing.T) {
 	store := NewMemorySnapshotStore()
 	arena := NewArena(store)

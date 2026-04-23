@@ -27,16 +27,20 @@ const (
 )
 
 type PicoclawRuntimeState struct {
-	ParticipantID      string                `json:"participant_id"`
-	PreferredMode      PicoclawPreferredMode `json:"preferred_mode"`
-	ActiveMode         PicoclawActiveMode    `json:"active_mode"`
-	SessionState       PicoclawSessionState  `json:"session_state"`
-	SessionID          string                `json:"session_id,omitempty"`
-	LastHeartbeatAt    time.Time             `json:"last_heartbeat_at,omitempty"`
-	LeaseExpiresAt     time.Time             `json:"lease_expires_at,omitempty"`
-	RecoveryDeadlineAt time.Time             `json:"recovery_deadline_at,omitempty"`
-	LastInviteAt       time.Time             `json:"last_invite_at,omitempty"`
-	LastInviteStatus   string                `json:"last_invite_status,omitempty"`
+	ParticipantID              string                `json:"participant_id"`
+	PreferredMode              PicoclawPreferredMode `json:"preferred_mode"`
+	ActiveMode                 PicoclawActiveMode    `json:"active_mode"`
+	SessionState               PicoclawSessionState  `json:"session_state"`
+	SessionID                  string                `json:"session_id,omitempty"`
+	LastHeartbeatAt            time.Time             `json:"last_heartbeat_at,omitempty"`
+	LeaseExpiresAt             time.Time             `json:"lease_expires_at,omitempty"`
+	RecoveryDeadlineAt         time.Time             `json:"recovery_deadline_at,omitempty"`
+	ConsecutiveSessionFailures int                   `json:"consecutive_session_failures,omitempty"`
+	ConsecutiveMessageFailures int                   `json:"consecutive_message_failures,omitempty"`
+	LastModeSwitchAt           time.Time             `json:"last_mode_switch_at,omitempty"`
+	LastSwitchReason           string                `json:"last_switch_reason,omitempty"`
+	LastInviteAt               time.Time             `json:"last_invite_at,omitempty"`
+	LastInviteStatus           string                `json:"last_invite_status,omitempty"`
 }
 
 func newPicoclawRuntimeState(participantID string) PicoclawRuntimeState {

@@ -200,13 +200,14 @@ type HostMatchView struct {
 }
 
 type Arena struct {
-	mu            sync.Mutex
-	store         SnapshotStore
-	rooms         map[string]*ArenaRoom
-	requestMove   func(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error)
-	requestInvite func(roomCode string, participant *Participant) (string, error)
-	ticker        *time.Ticker
-	done          chan struct{}
+	mu                 sync.Mutex
+	store              SnapshotStore
+	rooms              map[string]*ArenaRoom
+	requestMove        func(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error)
+	requestSessionMove func(matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error)
+	requestInvite      func(roomCode string, participant *Participant) (string, error)
+	ticker             *time.Ticker
+	done               chan struct{}
 }
 
 func NewArena(store SnapshotStore) *Arena {
@@ -214,6 +215,11 @@ func NewArena(store SnapshotStore) *Arena {
 		store: store,
 		rooms: make(map[string]*ArenaRoom),
 		requestMove: func(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+			defer cancel()
+			return askPicoForMove(ctx, defaultHTTPClient(), matchID, player, state, legal, arenaState)
+		},
+		requestSessionMove: func(matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
 			return askPicoForMove(ctx, defaultHTTPClient(), matchID, player, state, legal, arenaState)
@@ -1067,6 +1073,83 @@ func buildHostMatchView(room *ArenaRoom) HostMatchView {
 	}
 }
 
+type picoclawMoveAttempt struct {
+	Mode  PicoclawActiveMode
+	Reply string
+	Err   error
+}
+
+func updatePicoclawFailureCount(state PicoclawRuntimeState, mode PicoclawActiveMode, success bool) PicoclawRuntimeState {
+	switch mode {
+	case PicoclawActiveModeSession:
+		if success {
+			state.ConsecutiveSessionFailures = 0
+		} else {
+			state.ConsecutiveSessionFailures++
+		}
+	case PicoclawActiveModeMessage:
+		if success {
+			state.ConsecutiveMessageFailures = 0
+		} else {
+			state.ConsecutiveMessageFailures++
+		}
+	}
+	return state
+}
+
+func alternatePicoclawMode(mode PicoclawActiveMode) PicoclawActiveMode {
+	if mode == PicoclawActiveModeSession {
+		return PicoclawActiveModeMessage
+	}
+	return PicoclawActiveModeSession
+}
+
+func (a *Arena) requestMoveByMode(mode PicoclawActiveMode, matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
+	switch mode {
+	case PicoclawActiveModeSession:
+		if a.requestSessionMove != nil {
+			return a.requestSessionMove(matchID, participantID, player, state, legal, arenaState)
+		}
+		return a.requestMove(matchID, player, state, legal, arenaState)
+	default:
+		return a.requestMove(matchID, player, state, legal, arenaState)
+	}
+}
+
+func (a *Arena) requestPicoclawMove(matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState, runtime PicoclawRuntimeState, now time.Time) (string, string, PicoclawRuntimeState, []picoclawMoveAttempt, error) {
+	runtime.ActiveMode = resolvePicoclawActiveMode(runtime, now)
+	primaryMode := runtime.ActiveMode
+	move, reply, err := a.requestMoveByMode(primaryMode, matchID, participantID, player, state, legal, arenaState)
+	attempts := []picoclawMoveAttempt{{
+		Mode:  primaryMode,
+		Reply: reply,
+		Err:   err,
+	}}
+	if err == nil {
+		runtime = updatePicoclawFailureCount(runtime, primaryMode, true)
+		return move, reply, runtime, attempts, nil
+	}
+
+	runtime = updatePicoclawFailureCount(runtime, primaryMode, false)
+	fallbackMode := alternatePicoclawMode(primaryMode)
+	move, reply, fallbackErr := a.requestMoveByMode(fallbackMode, matchID, participantID, player, state, legal, arenaState)
+	attempts = append(attempts, picoclawMoveAttempt{
+		Mode:  fallbackMode,
+		Reply: reply,
+		Err:   fallbackErr,
+	})
+	if fallbackErr == nil {
+		runtime = updatePicoclawFailureCount(runtime, fallbackMode, true)
+		runtime.ActiveMode = fallbackMode
+		runtime.LastModeSwitchAt = now
+		runtime.LastSwitchReason = fmt.Sprintf("fallback_%s_to_%s", primaryMode, fallbackMode)
+		return move, reply, runtime, attempts, nil
+	}
+
+	runtime = updatePicoclawFailureCount(runtime, fallbackMode, false)
+	return "", reply, runtime, attempts, fmt.Errorf("%s mode failed: %v; %s mode failed: %w", primaryMode, err, fallbackMode, fallbackErr)
+}
+
 func (a *Arena) advanceRoom(code string) error {
 	a.mu.Lock()
 	room, ok := a.rooms[normalizeRoomCode(code)]
@@ -1098,9 +1181,29 @@ func (a *Arena) advanceRoom(code string) error {
 	legal := match.LegalMoves()
 	side := state.Side
 	matchID := match.ID
+	participantID := current.ID
+	useDualPath := false
+	runtimeState := PicoclawRuntimeState{}
+	if normalizeAgentType(current.RealType) == AgentTypePicoclaw && current.Connection == "managed" {
+		if managedState, managedErr := managedPicoclawRuntimeLocked(room, current.ID); managedErr == nil {
+			useDualPath = true
+			runtimeState = managedState
+		}
+	}
 	a.mu.Unlock()
 
-	move, reply, err := a.requestMove(matchID, player, state, legal, arenaState)
+	now := time.Now()
+	var (
+		move     string
+		reply    string
+		err      error
+		attempts []picoclawMoveAttempt
+	)
+	if useDualPath {
+		move, reply, runtimeState, attempts, err = a.requestPicoclawMove(matchID, participantID, player, state, legal, arenaState, runtimeState, now)
+	} else {
+		move, reply, err = a.requestMove(matchID, player, state, legal, arenaState)
+	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -1109,8 +1212,24 @@ func (a *Arena) advanceRoom(code string) error {
 		return nil
 	}
 	match = room.ActiveMatch
+	if useDualPath {
+		if room.PicoclawRuntime == nil {
+			room.PicoclawRuntime = make(map[string]PicoclawRuntimeState)
+		}
+		room.PicoclawRuntime[participantID] = runtimeState
+		for _, attempt := range attempts {
+			if attempt.Err != nil {
+				match.AppendAgentModeError(side, attempt.Mode, attempt.Reply, attempt.Err)
+			}
+		}
+		if len(attempts) == 2 && attempts[0].Err != nil && attempts[1].Err == nil {
+			match.AppendAgentModeFallback(side, attempts[0].Mode, attempts[1].Mode, runtimeState.LastSwitchReason)
+		}
+	}
 	if err != nil {
-		match.AppendAgentError(side, reply, err)
+		if !useDualPath {
+			match.AppendAgentError(side, reply, err)
+		}
 		room.Status = RoomStatusPaused
 		room.NextActionAt = time.Time{}
 		room.UpdatedAt = time.Now()
