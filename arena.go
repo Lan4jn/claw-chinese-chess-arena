@@ -1116,9 +1116,34 @@ func (a *Arena) requestMoveByMode(mode PicoclawActiveMode, matchID string, parti
 	}
 }
 
-func (a *Arena) requestPicoclawMove(matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState, runtime PicoclawRuntimeState, now time.Time) (string, string, PicoclawRuntimeState, []picoclawMoveAttempt, error) {
-	runtime.ActiveMode = resolvePicoclawActiveMode(runtime, now)
-	primaryMode := runtime.ActiveMode
+func fallbackSwitchReason(attempts []picoclawMoveAttempt) string {
+	if len(attempts) == 2 && attempts[0].Err != nil && attempts[1].Err == nil {
+		return fmt.Sprintf("fallback_%s_to_%s", attempts[0].Mode, attempts[1].Mode)
+	}
+	return ""
+}
+
+func applyPicoclawTurnOutcome(runtime PicoclawRuntimeState, attempts []picoclawMoveAttempt, now time.Time) PicoclawRuntimeState {
+	if len(attempts) == 0 {
+		return runtime
+	}
+	for _, attempt := range attempts {
+		runtime = updatePicoclawFailureCount(runtime, attempt.Mode, attempt.Err == nil)
+	}
+	runtime.ActiveMode = attempts[0].Mode
+	last := attempts[len(attempts)-1]
+	if last.Err == nil {
+		runtime.ActiveMode = last.Mode
+	}
+	if reason := fallbackSwitchReason(attempts); reason != "" {
+		runtime.LastModeSwitchAt = now
+		runtime.LastSwitchReason = reason
+	}
+	return runtime
+}
+
+func (a *Arena) requestPicoclawMove(matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState, runtime PicoclawRuntimeState, now time.Time) (string, string, []picoclawMoveAttempt, error) {
+	primaryMode := resolvePicoclawActiveMode(runtime, now)
 	move, reply, err := a.requestMoveByMode(primaryMode, matchID, participantID, player, state, legal, arenaState)
 	attempts := []picoclawMoveAttempt{{
 		Mode:  primaryMode,
@@ -1126,11 +1151,9 @@ func (a *Arena) requestPicoclawMove(matchID string, participantID string, player
 		Err:   err,
 	}}
 	if err == nil {
-		runtime = updatePicoclawFailureCount(runtime, primaryMode, true)
-		return move, reply, runtime, attempts, nil
+		return move, reply, attempts, nil
 	}
 
-	runtime = updatePicoclawFailureCount(runtime, primaryMode, false)
 	fallbackMode := alternatePicoclawMode(primaryMode)
 	move, reply, fallbackErr := a.requestMoveByMode(fallbackMode, matchID, participantID, player, state, legal, arenaState)
 	attempts = append(attempts, picoclawMoveAttempt{
@@ -1139,15 +1162,10 @@ func (a *Arena) requestPicoclawMove(matchID string, participantID string, player
 		Err:   fallbackErr,
 	})
 	if fallbackErr == nil {
-		runtime = updatePicoclawFailureCount(runtime, fallbackMode, true)
-		runtime.ActiveMode = fallbackMode
-		runtime.LastModeSwitchAt = now
-		runtime.LastSwitchReason = fmt.Sprintf("fallback_%s_to_%s", primaryMode, fallbackMode)
-		return move, reply, runtime, attempts, nil
+		return move, reply, attempts, nil
 	}
 
-	runtime = updatePicoclawFailureCount(runtime, fallbackMode, false)
-	return "", reply, runtime, attempts, fmt.Errorf("%s mode failed: %v; %s mode failed: %w", primaryMode, err, fallbackMode, fallbackErr)
+	return "", reply, attempts, fmt.Errorf("%s mode failed: %v; %s mode failed: %w", primaryMode, err, fallbackMode, fallbackErr)
 }
 
 func (a *Arena) advanceRoom(code string) error {
@@ -1200,7 +1218,7 @@ func (a *Arena) advanceRoom(code string) error {
 		attempts []picoclawMoveAttempt
 	)
 	if useDualPath {
-		move, reply, runtimeState, attempts, err = a.requestPicoclawMove(matchID, participantID, player, state, legal, arenaState, runtimeState, now)
+		move, reply, attempts, err = a.requestPicoclawMove(matchID, participantID, player, state, legal, arenaState, runtimeState, now)
 	} else {
 		move, reply, err = a.requestMove(matchID, player, state, legal, arenaState)
 	}
@@ -1213,17 +1231,20 @@ func (a *Arena) advanceRoom(code string) error {
 	}
 	match = room.ActiveMatch
 	if useDualPath {
-		if room.PicoclawRuntime == nil {
-			room.PicoclawRuntime = make(map[string]PicoclawRuntimeState)
+		if currentRuntime, runtimeErr := managedPicoclawRuntimeLocked(room, participantID); runtimeErr == nil {
+			currentRuntime = applyPicoclawTurnOutcome(currentRuntime, attempts, now)
+			if room.PicoclawRuntime == nil {
+				room.PicoclawRuntime = make(map[string]PicoclawRuntimeState)
+			}
+			room.PicoclawRuntime[participantID] = currentRuntime
 		}
-		room.PicoclawRuntime[participantID] = runtimeState
 		for _, attempt := range attempts {
 			if attempt.Err != nil {
 				match.AppendAgentModeError(side, attempt.Mode, attempt.Reply, attempt.Err)
 			}
 		}
 		if len(attempts) == 2 && attempts[0].Err != nil && attempts[1].Err == nil {
-			match.AppendAgentModeFallback(side, attempts[0].Mode, attempts[1].Mode, runtimeState.LastSwitchReason)
+			match.AppendAgentModeFallback(side, attempts[0].Mode, attempts[1].Mode, fallbackSwitchReason(attempts))
 		}
 	}
 	if err != nil {
