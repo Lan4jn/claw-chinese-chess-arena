@@ -153,6 +153,38 @@ func TestGameStateApplyAllowsCaptureThatBreaksLoop(t *testing.T) {
 	}
 }
 
+func TestGameStateApplyKeepsOrdinaryIllegalMoveErrorOutsideRepetitionFilter(t *testing.T) {
+	base := GameState{
+		Board: boardFromRows([]string{
+			"....k....",
+			".........",
+			".........",
+			".........",
+			"....PP...",
+			".........",
+			".........",
+			".........",
+			"....R....",
+			"....K....",
+		}),
+		Side:   SideRed,
+		Status: "playing",
+	}
+	bogus := stateAfterMove(t, base, "a0-a1")
+
+	g := base
+	g.RuleTraces = []RuleTrace{
+		{Side: SideRed, Move: "a0-a1", PositionKey: bogus.PositionKey()},
+		{Side: SideBlack, Move: "a1-a0", PositionKey: base.PositionKey()},
+		{Side: SideRed, Move: "a0-a1", PositionKey: bogus.PositionKey(), RepeatedPosition: true},
+	}
+
+	err := g.Apply("a0-a1")
+	if err == nil || err.Error() != "a0-a1 is not a legal move for red" {
+		t.Fatalf("expected ordinary illegal move error, got %v", err)
+	}
+}
+
 func boardFromRows(rows []string) Board {
 	var b Board
 	for y, row := range rows {

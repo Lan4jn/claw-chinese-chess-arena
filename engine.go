@@ -154,6 +154,9 @@ func (g GameState) LegalMoves(side Side) []Move {
 }
 
 func (g GameState) repetitionViolationForMove(mv Move) string {
+	if !g.isStructuralLegalCandidate(g.Side, mv) {
+		return ""
+	}
 	effects := g.classifyMoveEffects(mv)
 	if !effects.RepeatedPosition {
 		return ""
@@ -171,6 +174,32 @@ func (g GameState) repetitionViolationForMove(mv Move) string {
 		return "move causes forbidden idle repetition"
 	}
 	return ""
+}
+
+func (g GameState) isStructuralLegalCandidate(side Side, mv Move) bool {
+	found := false
+	for _, pseudo := range g.pseudoMoves(side) {
+		if pseudo == mv {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return false
+	}
+
+	next := g
+	next.applyUnchecked(mv)
+	if next.king(side) == nil {
+		return false
+	}
+	if next.kingsFacing() {
+		return false
+	}
+	if next.inCheck(side) {
+		return false
+	}
+	return true
 }
 
 func (g *GameState) Apply(moveText string) error {
