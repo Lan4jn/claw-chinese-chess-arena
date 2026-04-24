@@ -333,7 +333,7 @@ func (g GameState) isLongChaseRepetition(effects moveEffects) bool {
 		if trace.IsCapture || trace.GivesCheck {
 			return false
 		}
-		if !sameStringSet(trace.ChaseTargets, effects.ChaseTargets) {
+		if !equalSortedStrings(trace.ChaseTargets, effects.ChaseTargets) {
 			continue
 		}
 		matches++
@@ -344,7 +344,7 @@ func (g GameState) isLongChaseRepetition(effects moveEffects) bool {
 	return false
 }
 
-func sameStringSet(left, right []string) bool {
+func equalSortedStrings(left, right []string) bool {
 	if len(left) != len(right) {
 		return false
 	}

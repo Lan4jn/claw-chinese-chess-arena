@@ -82,6 +82,46 @@ func TestGameStateLegalMovesExcludeForbiddenLongCheck(t *testing.T) {
 	}
 }
 
+func TestGameStateLegalMovesExcludeForbiddenLongChase(t *testing.T) {
+	base := GameState{
+		Board: boardFromRows([]string{
+			"...k.....",
+			".........",
+			".....n...",
+			"....R....",
+			".........",
+			".........",
+			".........",
+			".........",
+			".........",
+			"....K....",
+		}),
+		Side:   SideRed,
+		Status: "playing",
+	}
+	afterRedChase := stateAfterMove(t, base, "e3-e2")
+	afterBlackOut := stateAfterMove(t, afterRedChase, "d0-d1")
+	afterRedReset := stateAfterMove(t, afterBlackOut, "e2-e3")
+	afterBlackBack := stateAfterMove(t, afterRedReset, "d1-d0")
+
+	g := base
+	g.RuleTraces = []RuleTrace{
+		{Side: SideRed, Move: "e3-e2", PositionKey: afterRedChase.PositionKey(), ChaseTargets: []string{"n@f2"}},
+		{Side: SideBlack, Move: "d0-d1", PositionKey: afterBlackOut.PositionKey()},
+		{Side: SideRed, Move: "e2-e3", PositionKey: afterRedReset.PositionKey()},
+		{Side: SideBlack, Move: "d1-d0", PositionKey: afterBlackBack.PositionKey()},
+		{Side: SideRed, Move: "e3-e2", PositionKey: afterRedChase.PositionKey(), ChaseTargets: []string{"n@f2"}, RepeatedPosition: true},
+		{Side: SideBlack, Move: "d0-d1", PositionKey: afterBlackOut.PositionKey(), RepeatedPosition: true},
+		{Side: SideRed, Move: "e2-e3", PositionKey: afterRedReset.PositionKey(), RepeatedPosition: true},
+		{Side: SideBlack, Move: "d1-d0", PositionKey: afterBlackBack.PositionKey(), RepeatedPosition: true},
+	}
+
+	moves := g.LegalMoveStrings()
+	if slicesContains(moves, "e3-e2") {
+		t.Fatalf("expected long-chase move e3-e2 to be filtered out, got %v", moves)
+	}
+}
+
 func TestGameStateApplyRejectsForbiddenIdleRepetition(t *testing.T) {
 	base := GameState{
 		Board: boardFromRows([]string{
