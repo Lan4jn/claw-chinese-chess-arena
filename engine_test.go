@@ -203,6 +203,49 @@ func TestGameStateApplyRejectsForbiddenLongCheckRepetition(t *testing.T) {
 	}
 }
 
+func TestGameStateApplyRejectsForbiddenLongChaseRepetition(t *testing.T) {
+	base := GameState{
+		Board: boardFromRows([]string{
+			"...k.....",
+			".........",
+			".....n...",
+			"....R....",
+			".........",
+			".........",
+			".........",
+			".........",
+			".........",
+			"....K....",
+		}),
+		Side:   SideRed,
+		Status: "playing",
+	}
+	afterRedChase := stateAfterMove(t, base, "e3-e2")
+	afterBlackOut := stateAfterMove(t, afterRedChase, "d0-d1")
+	afterRedReset := stateAfterMove(t, afterBlackOut, "e2-e3")
+	afterBlackBack := stateAfterMove(t, afterRedReset, "d1-d0")
+	if afterBlackBack.PositionKey() != base.PositionKey() {
+		t.Fatalf("expected loop to return to base position, got %s want %s", afterBlackBack.PositionKey(), base.PositionKey())
+	}
+
+	g := base
+	g.RuleTraces = []RuleTrace{
+		{Side: SideRed, Move: "e3-e2", PositionKey: afterRedChase.PositionKey(), ChaseTargets: []string{"n@f2"}},
+		{Side: SideBlack, Move: "d0-d1", PositionKey: afterBlackOut.PositionKey()},
+		{Side: SideRed, Move: "e2-e3", PositionKey: afterRedReset.PositionKey()},
+		{Side: SideBlack, Move: "d1-d0", PositionKey: afterBlackBack.PositionKey()},
+		{Side: SideRed, Move: "e3-e2", PositionKey: afterRedChase.PositionKey(), ChaseTargets: []string{"n@f2"}, RepeatedPosition: true},
+		{Side: SideBlack, Move: "d0-d1", PositionKey: afterBlackOut.PositionKey(), RepeatedPosition: true},
+		{Side: SideRed, Move: "e2-e3", PositionKey: afterRedReset.PositionKey(), RepeatedPosition: true},
+		{Side: SideBlack, Move: "d1-d0", PositionKey: afterBlackBack.PositionKey(), RepeatedPosition: true},
+	}
+
+	err := g.Apply("e3-e2")
+	if err == nil || err.Error() != "move causes forbidden long-chase repetition" {
+		t.Fatalf("expected forbidden long-chase repetition, got %v", err)
+	}
+}
+
 func TestGameStateApplyKeepsOrdinaryIllegalMoveErrorOutsideRepetitionFilter(t *testing.T) {
 	base := GameState{
 		Board: boardFromRows([]string{

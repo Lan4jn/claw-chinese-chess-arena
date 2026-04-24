@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
 )
@@ -153,6 +154,26 @@ func (g GameState) LegalMoves(side Side) []Move {
 	return legal
 }
 
+func (g GameState) LegalMovesIgnoringRepetition(side Side) []Move {
+	pseudo := g.pseudoMoves(side)
+	legal := make([]Move, 0, len(pseudo))
+	for _, mv := range pseudo {
+		next := g
+		next.applyUnchecked(mv)
+		if next.king(side) == nil {
+			continue
+		}
+		if next.kingsFacing() {
+			continue
+		}
+		if next.inCheck(side) {
+			continue
+		}
+		legal = append(legal, mv)
+	}
+	return legal
+}
+
 func (g GameState) repetitionViolationForMove(mv Move) string {
 	if !g.isStructuralLegalCandidate(g.Side, mv) {
 		return ""
@@ -296,12 +317,69 @@ func (g GameState) isLongCheckRepetition(side Side, effects moveEffects) bool {
 	return false
 }
 
-func (g GameState) isLongChaseRepetition(_ moveEffects) bool {
+func (g GameState) isLongChaseRepetition(effects moveEffects) bool {
+	if effects.IsCapture || effects.GivesCheck || !effects.RepeatedPosition || len(effects.ChaseTargets) == 0 {
+		return false
+	}
+	matches := 0
+	for i := len(g.RuleTraces) - 1; i >= 0; i-- {
+		trace := g.RuleTraces[i]
+		if trace.Side != g.Side {
+			continue
+		}
+		if trace.PositionKey != effects.PositionKey {
+			continue
+		}
+		if trace.IsCapture || trace.GivesCheck {
+			return false
+		}
+		if !sameStringSet(trace.ChaseTargets, effects.ChaseTargets) {
+			continue
+		}
+		matches++
+		if matches >= 2 {
+			return true
+		}
+	}
 	return false
 }
 
-func (g GameState) chaseTargetsForSide(_ Side) []string {
-	return nil
+func sameStringSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (g GameState) chaseTargetsForSide(attacker Side) []string {
+	targets := make([]string, 0, 4)
+	seen := map[string]bool{}
+	for _, mv := range g.LegalMovesIgnoringRepetition(attacker) {
+		target := g.Board[mv.ToY][mv.ToX]
+		if target == 0 {
+			continue
+		}
+		if pieceSide(target) == attacker {
+			continue
+		}
+		lower := strings.ToLower(string(target))
+		if lower == "k" || lower == "p" {
+			continue
+		}
+		key := fmt.Sprintf("%s@%c%d", lower, 'a'+mv.ToX, mv.ToY)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		targets = append(targets, key)
+	}
+	sort.Strings(targets)
+	return targets
 }
 
 func (g *GameState) applyUnchecked(mv Move) {
