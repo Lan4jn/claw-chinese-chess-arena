@@ -31,15 +31,26 @@ type MoveRecord struct {
 	Capture string `json:"capture,omitempty"`
 }
 
+type RuleTrace struct {
+	Side             Side     `json:"side"`
+	Move             string   `json:"move"`
+	PositionKey      string   `json:"position_key"`
+	GivesCheck       bool     `json:"gives_check"`
+	IsCapture        bool     `json:"is_capture"`
+	ChaseTargets     []string `json:"chase_targets,omitempty"`
+	RepeatedPosition bool     `json:"repeated_position"`
+}
+
 type GameState struct {
-	Board     Board        `json:"board"`
-	Side      Side         `json:"side"`
-	Winner    Side         `json:"winner,omitempty"`
-	Status    string       `json:"status"`
-	Reason    string       `json:"reason,omitempty"`
-	MoveCount int          `json:"move_count"`
-	LastMove  string       `json:"last_move,omitempty"`
-	History   []MoveRecord `json:"history"`
+	Board      Board        `json:"board"`
+	Side       Side         `json:"side"`
+	Winner     Side         `json:"winner,omitempty"`
+	Status     string       `json:"status"`
+	Reason     string       `json:"reason,omitempty"`
+	MoveCount  int          `json:"move_count"`
+	LastMove   string       `json:"last_move,omitempty"`
+	History    []MoveRecord `json:"history"`
+	RuleTraces []RuleTrace  `json:"rule_traces,omitempty"`
 }
 
 func NewGame() GameState {
@@ -75,6 +86,11 @@ func (g GameState) LegalMoveStrings() []string {
 	return out
 }
 
+func (g GameState) PositionKey() string {
+	rows := BoardRows(g.Board)
+	return string(g.Side) + "|" + strings.Join(rows, "/")
+}
+
 func (g GameState) LegalMoves(side Side) []Move {
 	pseudo := g.pseudoMoves(side)
 	legal := make([]Move, 0, len(pseudo))
@@ -90,9 +106,17 @@ func (g GameState) LegalMoves(side Side) []Move {
 		if next.inCheck(side) {
 			continue
 		}
+		if reason := g.repetitionViolationForMove(mv); reason != "" {
+			continue
+		}
 		legal = append(legal, mv)
 	}
 	return legal
+}
+
+func (g GameState) repetitionViolationForMove(mv Move) string {
+	_ = mv
+	return ""
 }
 
 func (g *GameState) Apply(moveText string) error {
