@@ -164,8 +164,8 @@ func (g GameState) repetitionViolationForMove(mv Move) string {
 	if effects.IsCapture {
 		return ""
 	}
-	if effects.GivesCheck {
-		return ""
+	if g.isLongCheckRepetition(g.Side, effects) {
+		return "move causes forbidden long-check repetition"
 	}
 	if g.isLongChaseRepetition(effects) {
 		return "move causes forbidden long-chase repetition"
@@ -262,6 +262,30 @@ func (g GameState) isIdleRepetition(effects moveEffects) bool {
 			continue
 		}
 		if trace.IsCapture || trace.GivesCheck || len(trace.ChaseTargets) > 0 {
+			return false
+		}
+		matches++
+		if matches >= 2 {
+			return true
+		}
+	}
+	return false
+}
+
+func (g GameState) isLongCheckRepetition(side Side, effects moveEffects) bool {
+	if !effects.GivesCheck || !effects.RepeatedPosition || effects.IsCapture {
+		return false
+	}
+	matches := 0
+	for i := len(g.RuleTraces) - 1; i >= 0; i-- {
+		trace := g.RuleTraces[i]
+		if trace.Side != side {
+			continue
+		}
+		if trace.PositionKey != effects.PositionKey {
+			continue
+		}
+		if !trace.GivesCheck || trace.IsCapture {
 			return false
 		}
 		matches++

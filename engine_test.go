@@ -43,7 +43,7 @@ func TestGameStateLegalMovesExcludeForbiddenIdleRepetition(t *testing.T) {
 }
 
 func TestGameStateLegalMovesExcludeForbiddenLongCheck(t *testing.T) {
-	g := GameState{
+	base := GameState{
 		Board: boardFromRows([]string{
 			"....k....",
 			".........",
@@ -58,12 +58,22 @@ func TestGameStateLegalMovesExcludeForbiddenLongCheck(t *testing.T) {
 		}),
 		Side:   SideRed,
 		Status: "playing",
-		RuleTraces: []RuleTrace{
-			{Side: SideRed, Move: "e2-e1", PositionKey: "check-a", GivesCheck: true},
-			{Side: SideBlack, Move: "e0-f0", PositionKey: "check-b"},
-			{Side: SideRed, Move: "e1-e2", PositionKey: "check-a", GivesCheck: true, RepeatedPosition: true},
-			{Side: SideBlack, Move: "f0-e0", PositionKey: "check-b", RepeatedPosition: true},
-		},
+	}
+	afterRedCheck := stateAfterMove(t, base, "e2-e1")
+	afterBlackOut := stateAfterMove(t, afterRedCheck, "e0-f0")
+	afterRedBack := stateAfterMove(t, afterBlackOut, "e1-e2")
+	afterBlackBack := stateAfterMove(t, afterRedBack, "f0-e0")
+
+	g := base
+	g.RuleTraces = []RuleTrace{
+		{Side: SideRed, Move: "e2-e1", PositionKey: afterRedCheck.PositionKey(), GivesCheck: true},
+		{Side: SideBlack, Move: "e0-f0", PositionKey: afterBlackOut.PositionKey()},
+		{Side: SideRed, Move: "e1-e2", PositionKey: afterRedBack.PositionKey()},
+		{Side: SideBlack, Move: "f0-e0", PositionKey: afterBlackBack.PositionKey()},
+		{Side: SideRed, Move: "e2-e1", PositionKey: afterRedCheck.PositionKey(), GivesCheck: true, RepeatedPosition: true},
+		{Side: SideBlack, Move: "e0-f0", PositionKey: afterBlackOut.PositionKey(), RepeatedPosition: true},
+		{Side: SideRed, Move: "e1-e2", PositionKey: afterRedBack.PositionKey(), RepeatedPosition: true},
+		{Side: SideBlack, Move: "f0-e0", PositionKey: afterBlackBack.PositionKey(), RepeatedPosition: true},
 	}
 
 	moves := g.LegalMoveStrings()
@@ -150,6 +160,46 @@ func TestGameStateApplyAllowsCaptureThatBreaksLoop(t *testing.T) {
 
 	if err := g.Apply("e8-e7"); err != nil {
 		t.Fatalf("expected capture to break repetition, got %v", err)
+	}
+}
+
+func TestGameStateApplyRejectsForbiddenLongCheckRepetition(t *testing.T) {
+	base := GameState{
+		Board: boardFromRows([]string{
+			"....k....",
+			".........",
+			"....R....",
+			".........",
+			".........",
+			".........",
+			".........",
+			".........",
+			".........",
+			"....K....",
+		}),
+		Side:   SideRed,
+		Status: "playing",
+	}
+	afterRedCheck := stateAfterMove(t, base, "e2-e1")
+	afterBlackOut := stateAfterMove(t, afterRedCheck, "e0-f0")
+	afterRedBack := stateAfterMove(t, afterBlackOut, "e1-e2")
+	afterBlackBack := stateAfterMove(t, afterRedBack, "f0-e0")
+
+	g := base
+	g.RuleTraces = []RuleTrace{
+		{Side: SideRed, Move: "e2-e1", PositionKey: afterRedCheck.PositionKey(), GivesCheck: true},
+		{Side: SideBlack, Move: "e0-f0", PositionKey: afterBlackOut.PositionKey()},
+		{Side: SideRed, Move: "e1-e2", PositionKey: afterRedBack.PositionKey()},
+		{Side: SideBlack, Move: "f0-e0", PositionKey: afterBlackBack.PositionKey()},
+		{Side: SideRed, Move: "e2-e1", PositionKey: afterRedCheck.PositionKey(), GivesCheck: true, RepeatedPosition: true},
+		{Side: SideBlack, Move: "e0-f0", PositionKey: afterBlackOut.PositionKey(), RepeatedPosition: true},
+		{Side: SideRed, Move: "e1-e2", PositionKey: afterRedBack.PositionKey(), RepeatedPosition: true},
+		{Side: SideBlack, Move: "f0-e0", PositionKey: afterBlackBack.PositionKey(), RepeatedPosition: true},
+	}
+
+	err := g.Apply("e2-e1")
+	if err == nil || err.Error() != "move causes forbidden long-check repetition" {
+		t.Fatalf("expected forbidden long-check repetition, got %v", err)
 	}
 }
 
