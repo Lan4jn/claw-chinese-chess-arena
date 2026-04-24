@@ -7,6 +7,7 @@ import (
 
 // Embed static assets so release binaries can serve the web UI
 // even when started outside the repository root.
+//
 //go:embed static
 var embeddedStaticAssets embed.FS
 

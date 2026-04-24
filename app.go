@@ -354,15 +354,16 @@ func (a *App) routes() http.Handler {
 				return
 			case "session/heartbeat":
 				var req struct {
-					SessionID  string `json:"session_id"`
-					LeaseTTLMS int64  `json:"lease_ttl_ms"`
+					SessionID    string `json:"session_id"`
+					SessionToken string `json:"session_token"`
+					LeaseTTLMS   int64  `json:"lease_ttl_ms"`
 				}
 				if err := decodeJSON(r, &req); err != nil {
 					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 					return
 				}
 				ttl := time.Duration(req.LeaseTTLMS) * time.Millisecond
-				view, err := a.arena.HeartbeatPicoclawSession(code, participantID, req.SessionID, ttl)
+				view, err := a.arena.HeartbeatPicoclawSession(code, participantID, req.SessionID, req.SessionToken, ttl)
 				if err != nil {
 					writeArenaRouteError(w, err, http.StatusBadRequest)
 					return
@@ -394,6 +395,51 @@ func (a *App) routes() http.Handler {
 					return
 				}
 				view, err := a.arena.SetPicoclawMode(code, req.HostToken, participantID, req.Mode)
+				if err != nil {
+					writeArenaRouteError(w, err, http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, view)
+				return
+			case "invite":
+				var req struct {
+					HostToken string `json:"host_token"`
+				}
+				if err := decodeJSON(r, &req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				reply, err := a.arena.InvitePicoclawWithBaseURL(code, req.HostToken, participantID, requestBaseURL(r))
+				if err != nil {
+					writeArenaRouteError(w, err, http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]string{"reply": reply})
+				return
+			case "turn":
+				var req struct {
+					SessionID    string `json:"session_id"`
+					SessionToken string `json:"session_token"`
+					TurnID       string `json:"turn_id"`
+					Move         string `json:"move"`
+					Reply        string `json:"reply"`
+					WaitMS       int64  `json:"wait_ms"`
+				}
+				if err := decodeJSON(r, &req); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+				if strings.TrimSpace(req.TurnID) != "" || strings.TrimSpace(req.Move) != "" {
+					view, err := a.arena.SubmitPicoclawTurn(code, participantID, req.SessionID, req.SessionToken, req.TurnID, req.Move, req.Reply)
+					if err != nil {
+						writeArenaRouteError(w, err, http.StatusBadRequest)
+						return
+					}
+					writeJSON(w, http.StatusOK, view)
+					return
+				}
+				wait := time.Duration(req.WaitMS) * time.Millisecond
+				view, err := a.arena.PollPicoclawTurn(code, participantID, req.SessionID, req.SessionToken, wait)
 				if err != nil {
 					writeArenaRouteError(w, err, http.StatusBadRequest)
 					return
@@ -516,6 +562,12 @@ func arenaPicoclawRouteParts(tail string) (string, string, bool) {
 	if len(parts) == 3 && parts[2] == "mode" {
 		return participantID, "mode", true
 	}
+	if len(parts) == 3 && parts[2] == "invite" {
+		return participantID, "invite", true
+	}
+	if len(parts) == 3 && parts[2] == "turn" {
+		return participantID, "turn", true
+	}
 	if len(parts) == 4 && parts[2] == "session" {
 		switch parts[3] {
 		case "open", "heartbeat", "close":
@@ -544,6 +596,28 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		log.Printf("writeJSON failed: %v", err)
 	}
+}
+
+func requestBaseURL(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	scheme := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])
+	if scheme == "" {
+		if r.TLS != nil {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
+	}
+	host := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Host"), ",")[0])
+	if host == "" {
+		host = strings.TrimSpace(r.Host)
+	}
+	if host == "" {
+		return ""
+	}
+	return normalizeArenaBaseURL(scheme + "://" + host)
 }
 
 func loggingMiddleware(next http.Handler) http.Handler {

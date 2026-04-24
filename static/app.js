@@ -189,6 +189,33 @@ function sideLabel(side) {
   return side === "red" ? "红方" : side === "black" ? "黑方" : "未开始";
 }
 
+function pieceDisplayLabel(piece) {
+  const normalized = String(piece || "").trim();
+  if (!normalized || normalized === ".") {
+    return "";
+  }
+  const upper = normalized.toUpperCase();
+  const isRed = normalized === upper;
+  switch (upper) {
+    case "K":
+      return isRed ? "帅" : "将";
+    case "A":
+      return isRed ? "仕" : "士";
+    case "B":
+      return isRed ? "相" : "象";
+    case "N":
+      return "马";
+    case "R":
+      return "车";
+    case "C":
+      return "炮";
+    case "P":
+      return isRed ? "兵" : "卒";
+    default:
+      return normalized;
+  }
+}
+
 function normalizeAgentType(value) {
   const raw = String(value || "").trim().toLowerCase();
   if (!raw || raw === "human") {
@@ -573,7 +600,8 @@ function renderBoard() {
         const chip = document.createElement("span");
         const isRed = piece === piece.toUpperCase();
         chip.className = "piece-chip " + (isRed ? "red" : "black");
-        chip.textContent = piece;
+        chip.textContent = pieceDisplayLabel(piece);
+        chip.title = piece;
         cell.appendChild(chip);
       }
       dom.boardGrid.appendChild(cell);
@@ -657,6 +685,8 @@ function formatRuntimeTime(raw) {
 
 function runtimeModeLabel(value) {
   switch (value) {
+    case "prefer_pico_ws":
+      return "prefer_pico_ws";
     case "prefer_session":
       return "prefer_session";
     case "prefer_message":
@@ -709,11 +739,14 @@ function renderPicoclawRuntime() {
       const preferredMode = runtimeModeLabel(runtime.preferred_mode);
       const activeMode = runtime.active_mode || "message";
       const sessionState = runtimeSessionStateLabel(runtime.session_state);
+      const wsState = runtimeSessionStateLabel(runtime.ws_state);
       const sessionID = runtime.session_id || "-";
+      const wsSessionID = runtime.ws_session_id || "-";
       const inviteStatus = runtime.last_invite_status || "-";
       const heartbeatAt = formatRuntimeTime(runtime.last_heartbeat_at);
       const leaseAt = formatRuntimeTime(runtime.lease_expires_at);
       const inviteAt = formatRuntimeTime(runtime.last_invite_at);
+      const wsRecvAt = formatRuntimeTime(runtime.ws_last_recv_at);
 
       return (
         '<article class="participant-item" data-runtime-participant-id="' +
@@ -728,12 +761,18 @@ function renderPicoclawRuntime() {
         escapeHTML(activeMode) +
         " · session: " +
         escapeHTML(sessionState) +
+        " · ws: " +
+        escapeHTML(wsState) +
         '</p><p class="participant-meta">session_id: ' +
         escapeHTML(sessionID) +
         " · heartbeat: " +
         escapeHTML(heartbeatAt) +
         " · lease: " +
         escapeHTML(leaseAt) +
+        '</p><p class="participant-meta">ws_session_id: ' +
+        escapeHTML(wsSessionID) +
+        " · ws_last_recv: " +
+        escapeHTML(wsRecvAt) +
         '</p><p class="participant-meta">last_invite: ' +
         escapeHTML(inviteAt) +
         " · invite_status: " +
@@ -742,7 +781,9 @@ function renderPicoclawRuntime() {
         escapeHTML(participant.id) +
         '"><option value="auto"' +
         (preferredMode === "auto" ? " selected" : "") +
-        '>auto</option><option value="prefer_session"' +
+        '>auto</option><option value="prefer_pico_ws"' +
+        (preferredMode === "prefer_pico_ws" ? " selected" : "") +
+        '>prefer_pico_ws</option><option value="prefer_session"' +
         (preferredMode === "prefer_session" ? " selected" : "") +
         '>prefer_session</option><option value="prefer_message"' +
         (preferredMode === "prefer_message" ? " selected" : "") +

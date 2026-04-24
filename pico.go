@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -26,6 +28,22 @@ type picoMessageResponse struct {
 	Error string `json:"error,omitempty"`
 }
 
+type PicoclawInviteRequest struct {
+	Player             PlayerConfig
+	RoomCode           string
+	ParticipantID      string
+	Seat               SeatType
+	PublicAlias        string
+	PreferredMode      PicoclawPreferredMode
+	ArenaBaseURL       string
+	SessionID          string
+	SessionToken       string
+	HeartbeatURL       string
+	TurnURL            string
+	KeepaliveEnabled   bool
+	ReservedInviteNote string
+}
+
 type PromptArenaState struct {
 	RoomCode       string
 	StepIntervalMS int
@@ -34,9 +52,36 @@ type PromptArenaState struct {
 
 var movePattern = regexp.MustCompile(`[a-i][0-9]-[a-i][0-9]`)
 
+type picoclawMessageRetryMeta struct {
+	Attempts int
+}
+
 func askPicoForMove(ctx context.Context, client *http.Client, matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
-	move, reply, _, err := askPicoclawForMoveWithRequest(ctx, client, matchID, player, state, legal, arenaState)
+	move, reply, _, _, err := askPicoclawForMoveWithRetry(ctx, client, matchID, player, state, legal, arenaState)
 	return move, reply, err
+}
+
+func askPicoclawForMoveWithRetry(ctx context.Context, client *http.Client, matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, picoMessageRequest, picoclawMessageRetryMeta, error) {
+	const maxAttempts = 3
+
+	var (
+		move    string
+		reply   string
+		req     picoMessageRequest
+		meta    picoclawMessageRetryMeta
+		lastErr error
+	)
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		move, reply, req, lastErr = askPicoclawForMoveWithRequest(ctx, client, matchID, player, state, legal, arenaState)
+		meta.Attempts = attempt
+		if lastErr == nil {
+			return move, reply, req, meta, nil
+		}
+		if attempt == maxAttempts || !isRetryablePicoclawMessageError(lastErr) {
+			return "", reply, req, meta, lastErr
+		}
+	}
+	return "", reply, req, meta, lastErr
 }
 
 func askPicoclawForMoveWithRequest(ctx context.Context, client *http.Client, matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, picoMessageRequest, error) {
@@ -93,20 +138,20 @@ func askPicoclawForMoveWithRequest(ctx context.Context, client *http.Client, mat
 	return move, decoded.Reply, payload, nil
 }
 
-func sendPicoclawInvite(ctx context.Context, client *http.Client, roomCode string, player PlayerConfig) (string, picoMessageRequest, error) {
-	if strings.TrimSpace(player.BaseURL) == "" {
-		return "", picoMessageRequest{}, fmt.Errorf("%s has no base_url", player.Name)
+func sendPicoclawInvite(ctx context.Context, client *http.Client, invite PicoclawInviteRequest) (string, picoMessageRequest, error) {
+	if strings.TrimSpace(invite.Player.BaseURL) == "" {
+		return "", picoMessageRequest{}, fmt.Errorf("%s has no base_url", invite.Player.Name)
 	}
-	endpoint, err := normalizePicoMessageURL(player.BaseURL)
+	endpoint, err := normalizePicoMessageURL(invite.Player.BaseURL)
 	if err != nil {
 		return "", picoMessageRequest{}, err
 	}
 	payload := picoMessageRequest{
-		SessionID:         "xiangqi-invite-" + normalizeRoomCode(roomCode),
+		SessionID:         "xiangqi-invite-" + normalizeRoomCode(invite.RoomCode),
 		SenderID:          "picoclaw-xiangqi-arena",
 		SenderDisplayName: "Picoclaw Xiangqi Arena",
-		Message:           buildInvitePrompt(roomCode, player),
-		APIKey:            strings.TrimSpace(player.APIKey),
+		Message:           buildInvitePrompt(invite),
+		APIKey:            strings.TrimSpace(invite.Player.APIKey),
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -142,6 +187,31 @@ func sendPicoclawInvite(ctx context.Context, client *http.Client, roomCode strin
 	return decoded.Reply, payload, nil
 }
 
+func isRetryablePicoclawMessageError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	msg := err.Error()
+	for _, snippet := range []string{
+		"HTTP 502",
+		"HTTP 503",
+		"HTTP 504",
+		"connection refused",
+		"connection reset",
+		"connection timed out",
+		"no such host",
+	} {
+		if strings.Contains(msg, snippet) {
+			return true
+		}
+	}
+	return false
+}
+
 func buildMovePrompt(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) string {
 	sideName := "红方"
 	if state.Side == SideBlack {
@@ -167,13 +237,62 @@ MOVE: h9-g7
 不要执行命令，不要解释长篇推理。`, matchID, arenaState.RoomCode, player.Name, sideName, arenaState.StepIntervalMS, arenaState.OpponentAlias, BoardText(state.Board), strings.Join(legal, ", "))
 }
 
-func buildInvitePrompt(roomCode string, player PlayerConfig) string {
+func buildInvitePrompt(invite PicoclawInviteRequest) string {
+	arenaBaseURL := strings.TrimSpace(invite.ArenaBaseURL)
+	if arenaBaseURL == "" {
+		arenaBaseURL = "未配置"
+	}
+	heartbeatURL := strings.TrimSpace(invite.HeartbeatURL)
+	if heartbeatURL == "" {
+		heartbeatURL = "未配置"
+	}
+	turnURL := strings.TrimSpace(invite.TurnURL)
+	if turnURL == "" {
+		turnURL = "未配置"
+	}
+	sessionID := strings.TrimSpace(invite.SessionID)
+	if sessionID == "" {
+		sessionID = "未配置"
+	}
+	sessionToken := strings.TrimSpace(invite.SessionToken)
+	if sessionToken == "" {
+		sessionToken = "未配置"
+	}
+	reservedInviteNote := strings.TrimSpace(invite.ReservedInviteNote)
+	if reservedInviteNote == "" {
+		reservedInviteNote = "保留接口：未来可能支持独立 /invite，但当前版本仍以 /message 完成邀请。"
+	}
 	return fmt.Sprintf(`你收到了一条来自中国象棋房间的邀请通知。
 房间号：%s。
 受邀身份：%s。
+公开代号：%s。
+seat：%s。
+participant_id：%s。
+preferred_mode：%s。
+arena_base_url：%s。
+keepalive_enabled：%t。
+session_id：%s。
+session_token：%s。
+heartbeat_url：%s。
+turn_url：%s。
+%s
 
-请确认你已收到邀请，并准备加入后续对局流程。
-请用简短中文回复，明确表示“已收到邀请”。`, roomCode, player.Name)
+如果你支持长期会话，请直接使用上面的 session_id、session_token、heartbeat_url、turn_url 接入 arena。
+请用简短中文回复，明确表示“已收到邀请”。`,
+		invite.RoomCode,
+		invite.Player.Name,
+		invite.PublicAlias,
+		invite.Seat,
+		invite.ParticipantID,
+		invite.PreferredMode,
+		arenaBaseURL,
+		invite.KeepaliveEnabled,
+		sessionID,
+		sessionToken,
+		heartbeatURL,
+		turnURL,
+		reservedInviteNote,
+	)
 }
 
 func extractMove(reply string, legal []string) string {
@@ -218,6 +337,11 @@ func normalizePicoMessageURL(raw string) (string, error) {
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 	return parsed.String(), nil
+}
+
+func normalizeArenaBaseURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	return strings.TrimRight(raw, "/")
 }
 
 func defaultHTTPClient() *http.Client {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -199,48 +200,53 @@ type HostMatchView struct {
 	RawLogs []MatchLogView `json:"raw_logs"`
 }
 
+type picoclawPendingTurn struct {
+	Request    PicoclawSessionTurn
+	ResponseCh chan picoclawPendingTurnResult
+}
+
+type picoclawPendingTurnResult struct {
+	Move  string
+	Reply string
+}
+
 type Arena struct {
 	mu                 sync.Mutex
 	store              SnapshotStore
 	rooms              map[string]*ArenaRoom
+	pendingTurns       map[string]*picoclawPendingTurn
+	wsClients          map[string]*picoclawWSClient
 	requestMove        func(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error)
 	requestSessionMove func(matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error)
-	requestInvite      func(roomCode string, participant *Participant) (string, error)
+	requestWSMove      func(matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error)
+	requestInvite      func(invite PicoclawInviteRequest) (string, error)
+	publicBaseURL      string
 	ticker             *time.Ticker
 	done               chan struct{}
 }
 
 func NewArena(store SnapshotStore) *Arena {
 	a := &Arena{
-		store: store,
-		rooms: make(map[string]*ArenaRoom),
+		store:        store,
+		rooms:        make(map[string]*ArenaRoom),
+		pendingTurns: make(map[string]*picoclawPendingTurn),
+		wsClients:    make(map[string]*picoclawWSClient),
 		requestMove: func(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
 			return askPicoForMove(ctx, defaultHTTPClient(), matchID, player, state, legal, arenaState)
 		},
-		requestSessionMove: func(matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
+		requestInvite: func(invite PicoclawInviteRequest) (string, error) {
 			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 			defer cancel()
-			return askPicoForMove(ctx, defaultHTTPClient(), matchID, player, state, legal, arenaState)
-		},
-		requestInvite: func(roomCode string, participant *Participant) (string, error) {
-			if participant == nil {
-				return "", fmt.Errorf("participant not found")
-			}
-			player := PlayerConfig{
-				Name:    participant.DisplayName,
-				BaseURL: participant.BaseURL,
-				APIKey:  participant.APIKey,
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-			defer cancel()
-			reply, _, err := sendPicoclawInvite(ctx, defaultHTTPClient(), roomCode, player)
+			reply, _, err := sendPicoclawInvite(ctx, defaultHTTPClient(), invite)
 			return reply, err
 		},
 		ticker: time.NewTicker(400 * time.Millisecond),
 		done:   make(chan struct{}),
 	}
+	a.requestSessionMove = a.requestManagedSessionMove
+	a.requestWSMove = a.requestManagedWSMove
 	if store != nil {
 		if snapshot, err := store.Load(); err == nil && snapshot != nil {
 			for _, room := range snapshot.Rooms {
@@ -252,9 +258,16 @@ func NewArena(store SnapshotStore) *Arena {
 	return a
 }
 
+func (a *Arena) SetPublicBaseURL(raw string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.publicBaseURL = normalizeArenaBaseURL(raw)
+}
+
 func (a *Arena) Close() {
 	close(a.done)
 	a.ticker.Stop()
+	a.closeWSClients()
 }
 
 func (a *Arena) Enter(req EnterRequest) (ArenaEnterView, error) {
@@ -362,7 +375,7 @@ func (a *Arena) HostRoom(code string, requester string) (HostRoomView, error) {
 	view := HostRoomView{
 		IsHost:  true,
 		Room:    buildPublicRoom(room, true),
-		Runtime: clonePicoclawRuntime(room.PicoclawRuntime),
+		Runtime: cloneHostPicoclawRuntime(room.PicoclawRuntime),
 	}
 	for _, participant := range room.Participants {
 		view.Participants = append(view.Participants, HostParticipantView{
@@ -395,8 +408,14 @@ func (a *Arena) OpenPicoclawSession(code, hostParticipantID, participantID strin
 	if err != nil {
 		return PicoclawRuntimeState{}, err
 	}
+	sessionAuthToken, err := randomSessionID()
+	if err != nil {
+		return PicoclawRuntimeState{}, err
+	}
 	now := time.Now()
 	state.SessionID = sessionID
+	state.SessionAuthToken = sessionAuthToken
+	state.SessionOpenedAt = now
 	state.SessionState = PicoclawSessionStateOpening
 	state.LastHeartbeatAt = time.Time{}
 	state.LeaseExpiresAt = time.Time{}
@@ -410,7 +429,7 @@ func (a *Arena) OpenPicoclawSession(code, hostParticipantID, participantID strin
 	return state, nil
 }
 
-func (a *Arena) HeartbeatPicoclawSession(code, participantID, sessionID string, ttl time.Duration) (PicoclawRuntimeState, error) {
+func (a *Arena) HeartbeatPicoclawSession(code, participantID, sessionID, sessionAuthToken string, ttl time.Duration) (PicoclawRuntimeState, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -418,15 +437,9 @@ func (a *Arena) HeartbeatPicoclawSession(code, participantID, sessionID string, 
 	if !ok {
 		return PicoclawRuntimeState{}, fmt.Errorf("room not found")
 	}
-	state, err := managedPicoclawRuntimeLocked(room, participantID)
+	state, err := authenticatedPicoclawRuntimeLocked(room, participantID, sessionID, sessionAuthToken)
 	if err != nil {
 		return PicoclawRuntimeState{}, err
-	}
-	if strings.TrimSpace(sessionID) == "" {
-		return PicoclawRuntimeState{}, fmt.Errorf("session_id is required")
-	}
-	if state.SessionID != sessionID {
-		return PicoclawRuntimeState{}, fmt.Errorf("session mismatch")
 	}
 	if ttl <= 0 {
 		ttl = 45 * time.Second
@@ -460,10 +473,12 @@ func (a *Arena) ClosePicoclawSession(code, hostParticipantID, participantID stri
 	now := time.Now()
 	state.SessionState = PicoclawSessionStateClosed
 	state.SessionID = ""
+	state.SessionAuthToken = ""
 	state.LastHeartbeatAt = time.Time{}
 	state.LeaseExpiresAt = time.Time{}
 	state.RecoveryDeadlineAt = time.Time{}
 	state.ActiveMode = resolvePicoclawActiveMode(state, now)
+	delete(a.pendingTurns, participantID)
 	room.PicoclawRuntime[participantID] = state
 	room.UpdatedAt = now
 	if err := a.saveLocked(); err != nil {
@@ -477,7 +492,7 @@ func (a *Arena) SetPicoclawMode(code, hostParticipantID, participantID string, m
 	defer a.mu.Unlock()
 
 	switch mode {
-	case PicoclawModeAuto, PicoclawModePreferSession, PicoclawModePreferMessage:
+	case PicoclawModeAuto, PicoclawModePreferPicoWS, PicoclawModePreferSession, PicoclawModePreferMessage:
 	default:
 		return PicoclawRuntimeState{}, fmt.Errorf("unsupported preferred_mode")
 	}
@@ -494,6 +509,8 @@ func (a *Arena) SetPicoclawMode(code, hostParticipantID, participantID string, m
 	now := time.Now()
 	state.PreferredMode = mode
 	state.ActiveMode = resolvePicoclawActiveMode(state, now)
+	state.LastModeSwitchAt = now
+	state.LastSwitchReason = "host_override"
 	room.PicoclawRuntime[participantID] = state
 	room.UpdatedAt = now
 	if err := a.saveLocked(); err != nil {
@@ -502,14 +519,98 @@ func (a *Arena) SetPicoclawMode(code, hostParticipantID, participantID string, m
 	return state, nil
 }
 
+func (a *Arena) PollPicoclawTurn(code, participantID, sessionID, sessionAuthToken string, wait time.Duration) (PicoclawSessionTurnResponse, error) {
+	if wait <= 0 {
+		wait = 25 * time.Second
+	}
+	if wait > 30*time.Second {
+		wait = 30 * time.Second
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		a.mu.Lock()
+		room, ok := a.rooms[normalizeRoomCode(code)]
+		if !ok {
+			a.mu.Unlock()
+			return PicoclawSessionTurnResponse{}, fmt.Errorf("room not found")
+		}
+		if _, err := authenticatedPicoclawRuntimeLocked(room, participantID, sessionID, sessionAuthToken); err != nil {
+			a.mu.Unlock()
+			return PicoclawSessionTurnResponse{}, err
+		}
+		if pending := a.pendingTurns[participantID]; pending != nil {
+			turnCopy := pending.Request
+			a.mu.Unlock()
+			return PicoclawSessionTurnResponse{
+				Status: PicoclawSessionTurnStatusTurn,
+				Turn:   &turnCopy,
+			}, nil
+		}
+		a.mu.Unlock()
+		if time.Now().After(deadline) {
+			return PicoclawSessionTurnResponse{
+				Status:       PicoclawSessionTurnStatusIdle,
+				RetryAfterMS: 1000,
+			}, nil
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
+func (a *Arena) SubmitPicoclawTurn(code, participantID, sessionID, sessionAuthToken, turnID, move, reply string) (PicoclawSessionTurnResponse, error) {
+	move = strings.TrimSpace(strings.ToLower(move))
+	reply = strings.TrimSpace(reply)
+	if move == "" {
+		return PicoclawSessionTurnResponse{}, fmt.Errorf("move is required")
+	}
+	if strings.TrimSpace(turnID) == "" {
+		return PicoclawSessionTurnResponse{}, fmt.Errorf("turn_id is required")
+	}
+
+	a.mu.Lock()
+	room, ok := a.rooms[normalizeRoomCode(code)]
+	if !ok {
+		a.mu.Unlock()
+		return PicoclawSessionTurnResponse{}, fmt.Errorf("room not found")
+	}
+	if _, err := authenticatedPicoclawRuntimeLocked(room, participantID, sessionID, sessionAuthToken); err != nil {
+		a.mu.Unlock()
+		return PicoclawSessionTurnResponse{}, err
+	}
+	pending := a.pendingTurns[participantID]
+	if pending == nil {
+		a.mu.Unlock()
+		return PicoclawSessionTurnResponse{}, fmt.Errorf("no pending session turn")
+	}
+	if pending.Request.TurnID != strings.TrimSpace(turnID) {
+		a.mu.Unlock()
+		return PicoclawSessionTurnResponse{}, fmt.Errorf("turn mismatch")
+	}
+	delete(a.pendingTurns, participantID)
+	responseCh := pending.ResponseCh
+	a.mu.Unlock()
+
+	responseCh <- picoclawPendingTurnResult{Move: move, Reply: reply}
+	return PicoclawSessionTurnResponse{Status: PicoclawSessionTurnStatusAccepted}, nil
+}
+
 func (a *Arena) InvitePicoclaw(code, hostParticipantID, participantID string) (string, error) {
+	return a.invitePicoclaw(code, hostParticipantID, participantID, "")
+}
+
+func (a *Arena) InvitePicoclawWithBaseURL(code, hostParticipantID, participantID, arenaBaseURL string) (string, error) {
+	return a.invitePicoclaw(code, hostParticipantID, participantID, arenaBaseURL)
+}
+
+func (a *Arena) invitePicoclaw(code, hostParticipantID, participantID, arenaBaseURL string) (string, error) {
 	a.mu.Lock()
 	room, err := a.hostRoomLocked(code, hostParticipantID)
 	if err != nil {
 		a.mu.Unlock()
 		return "", err
 	}
-	if _, err := managedPicoclawRuntimeLocked(room, participantID); err != nil {
+	state, err := managedPicoclawRuntimeLocked(room, participantID)
+	if err != nil {
 		a.mu.Unlock()
 		return "", err
 	}
@@ -518,12 +619,29 @@ func (a *Arena) InvitePicoclaw(code, hostParticipantID, participantID string) (s
 		a.mu.Unlock()
 		return "", fmt.Errorf("participant not found")
 	}
-	participantCopy := *participant
-	roomCode := room.Code
+	now := time.Now()
+	var changed bool
+	state, changed, err = ensurePicoclawInviteSessionLocked(state, now)
+	if err != nil {
+		a.mu.Unlock()
+		return "", err
+	}
+	if changed {
+		if room.PicoclawRuntime == nil {
+			room.PicoclawRuntime = make(map[string]PicoclawRuntimeState)
+		}
+		room.PicoclawRuntime[participantID] = state
+		room.UpdatedAt = now
+		if err := a.saveLocked(); err != nil {
+			a.mu.Unlock()
+			return "", err
+		}
+	}
+	invite := buildPicoclawInviteRequest(room, participant, state, firstNonEmpty(normalizeArenaBaseURL(arenaBaseURL), a.publicBaseURL))
 	a.mu.Unlock()
 
-	reply, inviteErr := a.requestInvite(roomCode, &participantCopy)
-	now := time.Now()
+	reply, inviteErr := a.requestInvite(invite)
+	now = time.Now()
 	status := "ok"
 	if inviteErr != nil {
 		status = inviteErr.Error()
@@ -538,7 +656,7 @@ func (a *Arena) InvitePicoclaw(code, hostParticipantID, participantID string) (s
 		}
 		return "", err
 	}
-	state, err := managedPicoclawRuntimeLocked(room, participantID)
+	state, err = managedPicoclawRuntimeLocked(room, participantID)
 	if err != nil {
 		if inviteErr != nil {
 			return "", fmt.Errorf("invite failed: %v; refresh runtime failed: %w", inviteErr, err)
@@ -1079,8 +1197,83 @@ type picoclawMoveAttempt struct {
 	Err   error
 }
 
+func seatTypeForSide(side Side) SeatType {
+	if side == SideRed {
+		return SeatRedPlayer
+	}
+	return SeatBlackPlayer
+}
+
+func buildPicoclawSessionTurnID(matchID string, side Side, moveCount int) string {
+	return fmt.Sprintf("%s-%s-%d", matchID, side, moveCount)
+}
+
+func (a *Arena) requestManagedSessionMove(matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
+	turn := PicoclawSessionTurn{
+		TurnID:         buildPicoclawSessionTurnID(matchID, state.Side, state.MoveCount),
+		MatchID:        matchID,
+		RoomCode:       arenaState.RoomCode,
+		Seat:           string(seatTypeForSide(state.Side)),
+		Side:           string(state.Side),
+		MoveCount:      state.MoveCount,
+		StepIntervalMS: arenaState.StepIntervalMS,
+		OpponentAlias:  arenaState.OpponentAlias,
+		BoardRows:      BoardRows(state.Board),
+		BoardText:      BoardText(state.Board),
+		LegalMoves:     append([]string(nil), legal...),
+		Prompt:         buildMovePrompt(matchID, player, state, legal, arenaState),
+	}
+	responseCh := make(chan picoclawPendingTurnResult, 1)
+
+	a.mu.Lock()
+	room, ok := a.rooms[normalizeRoomCode(arenaState.RoomCode)]
+	if !ok {
+		a.mu.Unlock()
+		return "", "", fmt.Errorf("room not found")
+	}
+	runtime, err := managedPicoclawRuntimeLocked(room, participantID)
+	if err != nil {
+		a.mu.Unlock()
+		return "", "", err
+	}
+	if strings.TrimSpace(runtime.SessionID) == "" {
+		a.mu.Unlock()
+		return "", "", fmt.Errorf("session is not open")
+	}
+	if existing := a.pendingTurns[participantID]; existing != nil {
+		a.mu.Unlock()
+		return "", "", fmt.Errorf("pending session turn already exists")
+	}
+	turn.SessionID = runtime.SessionID
+	a.pendingTurns[participantID] = &picoclawPendingTurn{
+		Request:    turn,
+		ResponseCh: responseCh,
+	}
+	a.mu.Unlock()
+
+	timeout := time.NewTimer(90 * time.Second)
+	defer timeout.Stop()
+	select {
+	case result := <-responseCh:
+		return result.Move, result.Reply, nil
+	case <-timeout.C:
+		a.mu.Lock()
+		if pending := a.pendingTurns[participantID]; pending != nil && pending.Request.TurnID == turn.TurnID {
+			delete(a.pendingTurns, participantID)
+		}
+		a.mu.Unlock()
+		return "", "", fmt.Errorf("session turn timed out")
+	}
+}
+
 func updatePicoclawFailureCount(state PicoclawRuntimeState, mode PicoclawActiveMode, success bool) PicoclawRuntimeState {
 	switch mode {
+	case PicoclawActiveModePicoWS:
+		if success {
+			state.ConsecutiveWSFailures = 0
+		} else {
+			state.ConsecutiveWSFailures++
+		}
 	case PicoclawActiveModeSession:
 		if success {
 			state.ConsecutiveSessionFailures = 0
@@ -1098,6 +1291,9 @@ func updatePicoclawFailureCount(state PicoclawRuntimeState, mode PicoclawActiveM
 }
 
 func alternatePicoclawMode(mode PicoclawActiveMode) PicoclawActiveMode {
+	if mode == PicoclawActiveModePicoWS {
+		return PicoclawActiveModeMessage
+	}
 	if mode == PicoclawActiveModeSession {
 		return PicoclawActiveModeMessage
 	}
@@ -1106,6 +1302,11 @@ func alternatePicoclawMode(mode PicoclawActiveMode) PicoclawActiveMode {
 
 func (a *Arena) requestMoveByMode(mode PicoclawActiveMode, matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
 	switch mode {
+	case PicoclawActiveModePicoWS:
+		if a.requestWSMove != nil {
+			return a.requestWSMove(matchID, participantID, player, state, legal, arenaState)
+		}
+		return a.requestMove(matchID, player, state, legal, arenaState)
 	case PicoclawActiveModeSession:
 		if a.requestSessionMove != nil {
 			return a.requestSessionMove(matchID, participantID, player, state, legal, arenaState)
@@ -1117,8 +1318,12 @@ func (a *Arena) requestMoveByMode(mode PicoclawActiveMode, matchID string, parti
 }
 
 func fallbackSwitchReason(attempts []picoclawMoveAttempt) string {
-	if len(attempts) == 2 && attempts[0].Err != nil && attempts[1].Err == nil {
-		return fmt.Sprintf("fallback_%s_to_%s", attempts[0].Mode, attempts[1].Mode)
+	if len(attempts) < 2 || attempts[0].Err == nil {
+		return ""
+	}
+	last := attempts[len(attempts)-1]
+	if last.Err == nil {
+		return fmt.Sprintf("fallback_%s_to_%s", attempts[0].Mode, last.Mode)
 	}
 	return ""
 }
@@ -1129,6 +1334,27 @@ func applyPicoclawTurnOutcome(runtime PicoclawRuntimeState, attempts []picoclawM
 	}
 	for _, attempt := range attempts {
 		runtime = updatePicoclawFailureCount(runtime, attempt.Mode, attempt.Err == nil)
+		if attempt.Mode == PicoclawActiveModePicoWS {
+			if attempt.Err == nil {
+				runtime.WSState = PicoclawWSStateActive
+				runtime.WSLastError = ""
+			} else if runtime.WSHealthy(now) {
+				runtime.WSState = PicoclawWSStateRecovering
+				runtime.WSLastError = attempt.Err.Error()
+			} else {
+				runtime.WSState = PicoclawWSStateStale
+				runtime.WSLastError = attempt.Err.Error()
+			}
+		}
+		if attempt.Mode == PicoclawActiveModeSession {
+			if attempt.Err == nil {
+				runtime.SessionState = PicoclawSessionStateActive
+			} else if runtime.SessionHealthy(now) {
+				runtime.SessionState = PicoclawSessionStateRecovering
+			} else {
+				runtime.SessionState = PicoclawSessionStateStale
+			}
+		}
 	}
 	runtime.ActiveMode = attempts[0].Mode
 	last := attempts[len(attempts)-1]
@@ -1143,29 +1369,24 @@ func applyPicoclawTurnOutcome(runtime PicoclawRuntimeState, attempts []picoclawM
 }
 
 func (a *Arena) requestPicoclawMove(matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState, runtime PicoclawRuntimeState, now time.Time) (string, string, []picoclawMoveAttempt, error) {
-	primaryMode := resolvePicoclawActiveMode(runtime, now)
-	move, reply, err := a.requestMoveByMode(primaryMode, matchID, participantID, player, state, legal, arenaState)
-	attempts := []picoclawMoveAttempt{{
-		Mode:  primaryMode,
-		Reply: reply,
-		Err:   err,
-	}}
-	if err == nil {
-		return move, reply, attempts, nil
+	modes := resolvePicoclawAttemptModes(runtime, now)
+	attempts := make([]picoclawMoveAttempt, 0, len(modes))
+	for _, mode := range modes {
+		move, reply, err := a.requestMoveByMode(mode, matchID, participantID, player, state, legal, arenaState)
+		attempts = append(attempts, picoclawMoveAttempt{
+			Mode:  mode,
+			Reply: reply,
+			Err:   err,
+		})
+		if err == nil {
+			return move, reply, attempts, nil
+		}
 	}
-
-	fallbackMode := alternatePicoclawMode(primaryMode)
-	move, reply, fallbackErr := a.requestMoveByMode(fallbackMode, matchID, participantID, player, state, legal, arenaState)
-	attempts = append(attempts, picoclawMoveAttempt{
-		Mode:  fallbackMode,
-		Reply: reply,
-		Err:   fallbackErr,
-	})
-	if fallbackErr == nil {
-		return move, reply, attempts, nil
+	if len(attempts) == 0 {
+		return "", "", nil, fmt.Errorf("no available picoclaw mode")
 	}
-
-	return "", reply, attempts, fmt.Errorf("%s mode failed: %v; %s mode failed: %w", primaryMode, err, fallbackMode, fallbackErr)
+	last := attempts[len(attempts)-1]
+	return "", last.Reply, attempts, fmt.Errorf("all picoclaw modes failed after %d attempts", len(attempts))
 }
 
 func (a *Arena) advanceRoom(code string) error {
@@ -1243,8 +1464,9 @@ func (a *Arena) advanceRoom(code string) error {
 				match.AppendAgentModeError(side, attempt.Mode, attempt.Reply, attempt.Err)
 			}
 		}
-		if len(attempts) == 2 && attempts[0].Err != nil && attempts[1].Err == nil {
-			match.AppendAgentModeFallback(side, attempts[0].Mode, attempts[1].Mode, fallbackSwitchReason(attempts))
+		if reason := fallbackSwitchReason(attempts); reason != "" {
+			successMode := attempts[len(attempts)-1].Mode
+			match.AppendAgentModeFallback(side, attempts[0].Mode, successMode, reason)
 		}
 	}
 	if err != nil {
@@ -1316,8 +1538,90 @@ func managedPicoclawRuntimeLocked(room *ArenaRoom, participantID string) (Picocl
 	return state, nil
 }
 
+func authenticatedPicoclawRuntimeLocked(room *ArenaRoom, participantID, sessionID, sessionAuthToken string) (PicoclawRuntimeState, error) {
+	state, err := managedPicoclawRuntimeLocked(room, participantID)
+	if err != nil {
+		return PicoclawRuntimeState{}, err
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return PicoclawRuntimeState{}, fmt.Errorf("session_id is required")
+	}
+	if strings.TrimSpace(sessionAuthToken) == "" {
+		return PicoclawRuntimeState{}, fmt.Errorf("session_token is required")
+	}
+	if state.SessionID != strings.TrimSpace(sessionID) {
+		return PicoclawRuntimeState{}, fmt.Errorf("session mismatch")
+	}
+	if subtle.ConstantTimeCompare([]byte(state.SessionAuthToken), []byte(strings.TrimSpace(sessionAuthToken))) != 1 {
+		return PicoclawRuntimeState{}, fmt.Errorf("session token mismatch")
+	}
+	return state, nil
+}
+
+func ensurePicoclawInviteSessionLocked(state PicoclawRuntimeState, now time.Time) (PicoclawRuntimeState, bool, error) {
+	if strings.TrimSpace(state.SessionID) != "" && strings.TrimSpace(state.SessionAuthToken) != "" && state.SessionState != PicoclawSessionStateClosed {
+		return state, false, nil
+	}
+	sessionID, err := randomSessionID()
+	if err != nil {
+		return PicoclawRuntimeState{}, false, err
+	}
+	sessionToken, err := randomSessionID()
+	if err != nil {
+		return PicoclawRuntimeState{}, false, err
+	}
+	state.SessionID = sessionID
+	state.SessionAuthToken = sessionToken
+	state.SessionOpenedAt = now
+	state.SessionState = PicoclawSessionStateOpening
+	state.LastHeartbeatAt = time.Time{}
+	state.LeaseExpiresAt = time.Time{}
+	state.RecoveryDeadlineAt = time.Time{}
+	state.ActiveMode = resolvePicoclawActiveMode(state, now)
+	return state, true, nil
+}
+
+func buildPicoclawInviteRequest(room *ArenaRoom, participant *Participant, runtime PicoclawRuntimeState, arenaBaseURL string) PicoclawInviteRequest {
+	player := PlayerConfig{
+		Name:    participant.DisplayName,
+		BaseURL: participant.BaseURL,
+		APIKey:  participant.APIKey,
+	}
+	arenaBaseURL = normalizeArenaBaseURL(arenaBaseURL)
+	heartbeatURL := ""
+	turnURL := ""
+	if arenaBaseURL != "" {
+		heartbeatURL = fmt.Sprintf("%s/api/arena/%s/picoclaw/%s/session/heartbeat", arenaBaseURL, room.Code, participant.ID)
+		turnURL = fmt.Sprintf("%s/api/arena/%s/picoclaw/%s/turn", arenaBaseURL, room.Code, participant.ID)
+	}
+	return PicoclawInviteRequest{
+		Player:             player,
+		RoomCode:           room.Code,
+		ParticipantID:      participant.ID,
+		Seat:               participant.Seat,
+		PublicAlias:        participant.PublicAlias,
+		PreferredMode:      runtime.PreferredMode,
+		ArenaBaseURL:       arenaBaseURL,
+		SessionID:          runtime.SessionID,
+		SessionToken:       runtime.SessionAuthToken,
+		HeartbeatURL:       heartbeatURL,
+		TurnURL:            turnURL,
+		KeepaliveEnabled:   true,
+		ReservedInviteNote: "保留接口：未来可能支持独立 /invite，但当前版本仍以 /message 完成邀请。",
+	}
+}
+
 func normalizeRoomCode(code string) string {
 	return strings.TrimSpace(strings.ToLower(code))
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 func randomSessionID() (string, error) {
@@ -1448,6 +1752,15 @@ func clonePicoclawRuntime(runtime map[string]PicoclawRuntimeState) map[string]Pi
 	return out
 }
 
+func cloneHostPicoclawRuntime(runtime map[string]PicoclawRuntimeState) map[string]PicoclawRuntimeState {
+	out := clonePicoclawRuntime(runtime)
+	for participantID, state := range out {
+		state.SessionAuthToken = ""
+		out[participantID] = state
+	}
+	return out
+}
+
 func (a *Arena) updateParticipantBinding(code string, requester string, binding AgentBinding) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -1494,6 +1807,9 @@ func ensurePicoclawRuntime(room *ArenaRoom, participant *Participant) {
 		return
 	}
 	state.ParticipantID = participant.ID
+	if state.SessionState == PicoclawSessionStateActive && (state.LeaseExpiresAt.IsZero() || time.Now().After(state.LeaseExpiresAt)) {
+		state.SessionState = PicoclawSessionStateStale
+	}
 	room.PicoclawRuntime[participant.ID] = state
 }
 
