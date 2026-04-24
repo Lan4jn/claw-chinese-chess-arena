@@ -53,6 +53,14 @@ type GameState struct {
 	RuleTraces []RuleTrace  `json:"rule_traces,omitempty"`
 }
 
+type moveEffects struct {
+	PositionKey      string
+	GivesCheck       bool
+	IsCapture        bool
+	ChaseTargets     []string
+	RepeatedPosition bool
+}
+
 func NewGame() GameState {
 	var b Board
 	rows := []string{
@@ -86,6 +94,37 @@ func (g GameState) LegalMoveStrings() []string {
 	return out
 }
 
+func (g GameState) classifyMoveEffects(mv Move) moveEffects {
+	next := g
+	captured := next.Board[mv.ToY][mv.ToX]
+	next.applyUnchecked(mv)
+	effects := moveEffects{
+		PositionKey: next.PositionKey(),
+		GivesCheck:  next.inCheck(next.Side),
+		IsCapture:   captured != 0,
+	}
+	for _, trace := range g.RuleTraces {
+		if trace.PositionKey == effects.PositionKey {
+			effects.RepeatedPosition = true
+			break
+		}
+	}
+	effects.ChaseTargets = next.chaseTargetsForSide(opposite(next.Side))
+	return effects
+}
+
+func (g GameState) buildRuleTrace(side Side, move string, effects moveEffects) RuleTrace {
+	return RuleTrace{
+		Side:             side,
+		Move:             move,
+		PositionKey:      effects.PositionKey,
+		GivesCheck:       effects.GivesCheck,
+		IsCapture:        effects.IsCapture,
+		ChaseTargets:     append([]string(nil), effects.ChaseTargets...),
+		RepeatedPosition: effects.RepeatedPosition,
+	}
+}
+
 func (g GameState) PositionKey() string {
 	rows := BoardRows(g.Board)
 	return string(g.Side) + "|" + strings.Join(rows, "/")
@@ -115,7 +154,22 @@ func (g GameState) LegalMoves(side Side) []Move {
 }
 
 func (g GameState) repetitionViolationForMove(mv Move) string {
-	_ = mv
+	effects := g.classifyMoveEffects(mv)
+	if !effects.RepeatedPosition {
+		return ""
+	}
+	if effects.IsCapture {
+		return ""
+	}
+	if effects.GivesCheck {
+		return ""
+	}
+	if g.isLongChaseRepetition(effects) {
+		return "move causes forbidden long-chase repetition"
+	}
+	if g.isIdleRepetition(effects) {
+		return "move causes forbidden idle repetition"
+	}
 	return ""
 }
 
@@ -135,30 +189,65 @@ func (g *GameState) Apply(moveText string) error {
 		}
 	}
 	if !ok {
+		if reason := g.repetitionViolationForMove(mv); reason != "" {
+			return fmt.Errorf(reason)
+		}
 		return fmt.Errorf("%s is not a legal move for %s", moveText, g.Side)
 	}
 	piece := g.Board[mv.FromY][mv.FromX]
 	captured := g.Board[mv.ToY][mv.ToX]
+	effects := g.classifyMoveEffects(mv)
+	movingSide := g.Side
 	g.applyUnchecked(mv)
 	g.LastMove = mv.String()
 	g.MoveCount++
 	g.History = append(g.History, MoveRecord{
-		Side:    opposite(g.Side),
+		Side:    movingSide,
 		Move:    mv.String(),
 		Piece:   string(piece),
 		Capture: pieceString(captured),
 	})
+	g.RuleTraces = append(g.RuleTraces, g.buildRuleTrace(movingSide, mv.String(), effects))
 	if g.king(g.Side) == nil {
-		g.Winner = opposite(g.Side)
+		g.Winner = movingSide
 		g.Status = "finished"
 		g.Reason = "king captured"
 		return nil
 	}
 	if len(g.LegalMoves(g.Side)) == 0 {
-		g.Winner = opposite(g.Side)
+		g.Winner = movingSide
 		g.Status = "finished"
 		g.Reason = "no legal moves"
 	}
+	return nil
+}
+
+func (g GameState) isIdleRepetition(effects moveEffects) bool {
+	if effects.IsCapture || effects.GivesCheck || len(effects.ChaseTargets) > 0 {
+		return false
+	}
+	matches := 0
+	for i := len(g.RuleTraces) - 1; i >= 0; i-- {
+		trace := g.RuleTraces[i]
+		if trace.PositionKey != effects.PositionKey {
+			continue
+		}
+		if trace.IsCapture || trace.GivesCheck || len(trace.ChaseTargets) > 0 {
+			return false
+		}
+		matches++
+		if matches >= 2 {
+			return true
+		}
+	}
+	return false
+}
+
+func (g GameState) isLongChaseRepetition(_ moveEffects) bool {
+	return false
+}
+
+func (g GameState) chaseTargetsForSide(_ Side) []string {
 	return nil
 }
 
