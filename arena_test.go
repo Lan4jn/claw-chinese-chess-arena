@@ -1559,3 +1559,119 @@ func TestPicoclawSessionHeartbeatRejectsSessionMismatch(t *testing.T) {
 		t.Fatalf("expected HeartbeatPicoclawSession() to reject session mismatch")
 	}
 }
+
+func TestMatchApplyHumanMovePreservesRepetitionErrorText(t *testing.T) {
+	match, err := NewMatch("repeat-room", 3000, map[Side]PlayerConfig{
+		SideRed:   {Type: AgentTypeHuman, Name: "Red"},
+		SideBlack: {Type: AgentTypeHuman, Name: "Black"},
+	}, map[Side]string{
+		SideRed:   "Red",
+		SideBlack: "Black",
+	}, map[Side]string{
+		SideRed:   "red-id",
+		SideBlack: "black-id",
+	})
+	if err != nil {
+		t.Fatalf("NewMatch() error = %v", err)
+	}
+
+	base := GameState{
+		Board: boardFromRows([]string{
+			"....k....",
+			".........",
+			"....R....",
+			".........",
+			".........",
+			".........",
+			".........",
+			".........",
+			".........",
+			"....K....",
+		}),
+		Side:   SideRed,
+		Status: "playing",
+	}
+	afterRedCheck := stateAfterMove(t, base, "e2-e1")
+	afterBlackOut := stateAfterMove(t, afterRedCheck, "e0-f0")
+	afterRedBack := stateAfterMove(t, afterBlackOut, "e1-e2")
+	afterBlackBack := stateAfterMove(t, afterRedBack, "f0-e0")
+
+	match.State = base
+	match.State.RuleTraces = []RuleTrace{
+		{Side: SideRed, Move: "e2-e1", PositionKey: afterRedCheck.PositionKey(), GivesCheck: true},
+		{Side: SideBlack, Move: "e0-f0", PositionKey: afterBlackOut.PositionKey()},
+		{Side: SideRed, Move: "e1-e2", PositionKey: afterRedBack.PositionKey()},
+		{Side: SideBlack, Move: "f0-e0", PositionKey: afterBlackBack.PositionKey()},
+		{Side: SideRed, Move: "e2-e1", PositionKey: afterRedCheck.PositionKey(), GivesCheck: true, RepeatedPosition: true},
+		{Side: SideBlack, Move: "e0-f0", PositionKey: afterBlackOut.PositionKey(), RepeatedPosition: true},
+		{Side: SideRed, Move: "e1-e2", PositionKey: afterRedBack.PositionKey(), RepeatedPosition: true},
+		{Side: SideBlack, Move: "f0-e0", PositionKey: afterBlackBack.PositionKey(), RepeatedPosition: true},
+	}
+
+	err = match.ApplyHumanMove(SideRed, "e2-e1")
+	if err == nil || err.Error() != "move causes forbidden long-check repetition" {
+		t.Fatalf("expected long-check repetition error, got %v", err)
+	}
+	last := match.Logs[len(match.Logs)-1]
+	if last.Error != "move causes forbidden long-check repetition" {
+		t.Fatalf("expected repetition error to reach logs, got %#v", last)
+	}
+}
+
+func TestMatchApplyAgentMovePreservesRepetitionErrorText(t *testing.T) {
+	match, err := NewMatch("repeat-agent-room", 3000, map[Side]PlayerConfig{
+		SideRed:   {Type: AgentTypePicoclaw, Name: "Red Pico"},
+		SideBlack: {Type: AgentTypePicoclaw, Name: "Black Pico"},
+	}, map[Side]string{
+		SideRed:   "Red Pico",
+		SideBlack: "Black Pico",
+	}, map[Side]string{
+		SideRed:   "red-id",
+		SideBlack: "black-id",
+	})
+	if err != nil {
+		t.Fatalf("NewMatch() error = %v", err)
+	}
+
+	base := GameState{
+		Board: boardFromRows([]string{
+			"...k.....",
+			".........",
+			".....n...",
+			"....R....",
+			".........",
+			".........",
+			".........",
+			".........",
+			".........",
+			"....K....",
+		}),
+		Side:   SideRed,
+		Status: "playing",
+	}
+	afterRedChase := stateAfterMove(t, base, "e3-e2")
+	afterBlackOut := stateAfterMove(t, afterRedChase, "d0-d1")
+	afterRedReset := stateAfterMove(t, afterBlackOut, "e2-e3")
+	afterBlackBack := stateAfterMove(t, afterRedReset, "d1-d0")
+
+	match.State = base
+	match.State.RuleTraces = []RuleTrace{
+		{Side: SideRed, Move: "e3-e2", PositionKey: afterRedChase.PositionKey(), ChaseTargets: []string{"n@f2"}},
+		{Side: SideBlack, Move: "d0-d1", PositionKey: afterBlackOut.PositionKey()},
+		{Side: SideRed, Move: "e2-e3", PositionKey: afterRedReset.PositionKey()},
+		{Side: SideBlack, Move: "d1-d0", PositionKey: afterBlackBack.PositionKey()},
+		{Side: SideRed, Move: "e3-e2", PositionKey: afterRedChase.PositionKey(), ChaseTargets: []string{"n@f2"}, RepeatedPosition: true},
+		{Side: SideBlack, Move: "d0-d1", PositionKey: afterBlackOut.PositionKey(), RepeatedPosition: true},
+		{Side: SideRed, Move: "e2-e3", PositionKey: afterRedReset.PositionKey(), RepeatedPosition: true},
+		{Side: SideBlack, Move: "d1-d0", PositionKey: afterBlackBack.PositionKey(), RepeatedPosition: true},
+	}
+
+	err = match.ApplyAgentMove(SideRed, "e3-e2", "MOVE: e3-e2")
+	if err == nil || err.Error() != "move causes forbidden long-chase repetition" {
+		t.Fatalf("expected long-chase repetition error, got %v", err)
+	}
+	last := match.Logs[len(match.Logs)-1]
+	if last.Error != "move causes forbidden long-chase repetition" {
+		t.Fatalf("expected repetition error to reach logs, got %#v", last)
+	}
+}
