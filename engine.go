@@ -104,7 +104,7 @@ func (g GameState) classifyMoveEffects(mv Move) moveEffects {
 		GivesCheck:  next.inCheck(next.Side),
 		IsCapture:   captured != 0,
 	}
-	for _, trace := range g.RuleTraces {
+	for _, trace := range g.recentRepetitionTraces() {
 		if trace.PositionKey == effects.PositionKey {
 			effects.RepeatedPosition = true
 			break
@@ -272,13 +272,51 @@ func (g *GameState) Apply(moveText string) error {
 	return nil
 }
 
+func (g GameState) recentRepetitionTraces() []RuleTrace {
+	if len(g.RuleTraces) < 2 {
+		return nil
+	}
+	currentKey := g.PositionKey()
+	if g.RuleTraces[len(g.RuleTraces)-1].PositionKey != currentKey {
+		return nil
+	}
+
+	windowKeys := map[string]bool{
+		currentKey: true,
+	}
+	start := len(g.RuleTraces) - 1
+	foundPriorCurrent := false
+	for i := len(g.RuleTraces) - 2; i >= 0; i-- {
+		trace := g.RuleTraces[i]
+		windowKeys[trace.PositionKey] = true
+		start = i
+		if trace.PositionKey == currentKey {
+			foundPriorCurrent = true
+			break
+		}
+	}
+	if !foundPriorCurrent {
+		return nil
+	}
+
+	for i := start - 1; i >= 0; i-- {
+		trace := g.RuleTraces[i]
+		if !windowKeys[trace.PositionKey] {
+			break
+		}
+		start = i
+	}
+	return g.RuleTraces[start:]
+}
+
 func (g GameState) isIdleRepetition(effects moveEffects) bool {
 	if effects.IsCapture || effects.GivesCheck || len(effects.ChaseTargets) > 0 {
 		return false
 	}
 	matches := 0
-	for i := len(g.RuleTraces) - 1; i >= 0; i-- {
-		trace := g.RuleTraces[i]
+	traces := g.recentRepetitionTraces()
+	for i := len(traces) - 1; i >= 0; i-- {
+		trace := traces[i]
 		if trace.PositionKey != effects.PositionKey {
 			continue
 		}
@@ -298,8 +336,9 @@ func (g GameState) isLongCheckRepetition(side Side, effects moveEffects) bool {
 		return false
 	}
 	matches := 0
-	for i := len(g.RuleTraces) - 1; i >= 0; i-- {
-		trace := g.RuleTraces[i]
+	traces := g.recentRepetitionTraces()
+	for i := len(traces) - 1; i >= 0; i-- {
+		trace := traces[i]
 		if trace.Side != side {
 			continue
 		}
@@ -322,8 +361,9 @@ func (g GameState) isLongChaseRepetition(effects moveEffects) bool {
 		return false
 	}
 	matches := 0
-	for i := len(g.RuleTraces) - 1; i >= 0; i-- {
-		trace := g.RuleTraces[i]
+	traces := g.recentRepetitionTraces()
+	for i := len(traces) - 1; i >= 0; i-- {
+		trace := traces[i]
 		if trace.Side != g.Side {
 			continue
 		}

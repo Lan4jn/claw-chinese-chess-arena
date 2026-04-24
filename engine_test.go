@@ -203,6 +203,59 @@ func TestGameStateApplyAllowsCaptureThatBreaksLoop(t *testing.T) {
 	}
 }
 
+func TestGameStateApplyAllowsIdleMoveAfterRepetitionChainReset(t *testing.T) {
+	base := GameState{
+		Board: boardFromRows([]string{
+			"....k....",
+			".........",
+			".........",
+			".........",
+			"....PP...",
+			".........",
+			".........",
+			".........",
+			"....R....",
+			"....K....",
+		}),
+		Side:   SideRed,
+		Status: "playing",
+	}
+	afterRedOut := stateAfterMove(t, base, "e8-f8")
+	afterBlackOut := stateAfterMove(t, afterRedOut, "e0-f0")
+	afterRedBack := stateAfterMove(t, afterBlackOut, "f8-e8")
+	afterBlackBack := stateAfterMove(t, afterRedBack, "f0-e0")
+	afterBreakRedOut := stateAfterMove(t, afterBlackBack, "e8-d8")
+	afterBreakBlackOut := stateAfterMove(t, afterBreakRedOut, "e0-d0")
+	afterBreakRedBack := stateAfterMove(t, afterBreakBlackOut, "d8-e8")
+	afterBreakBlackBack := stateAfterMove(t, afterBreakRedBack, "d0-e0")
+	if afterBreakBlackBack.PositionKey() != base.PositionKey() {
+		t.Fatalf("expected break sequence to return to base position, got %s want %s", afterBreakBlackBack.PositionKey(), base.PositionKey())
+	}
+
+	g := base
+	g.RuleTraces = []RuleTrace{
+		{Side: SideRed, Move: "e8-f8", PositionKey: afterRedOut.PositionKey()},
+		{Side: SideBlack, Move: "e0-f0", PositionKey: afterBlackOut.PositionKey()},
+		{Side: SideRed, Move: "f8-e8", PositionKey: afterRedBack.PositionKey()},
+		{Side: SideBlack, Move: "f0-e0", PositionKey: afterBlackBack.PositionKey()},
+		{Side: SideRed, Move: "e8-f8", PositionKey: afterRedOut.PositionKey(), RepeatedPosition: true},
+		{Side: SideBlack, Move: "e0-f0", PositionKey: afterBlackOut.PositionKey(), RepeatedPosition: true},
+		{Side: SideRed, Move: "f8-e8", PositionKey: afterRedBack.PositionKey(), RepeatedPosition: true},
+		{Side: SideBlack, Move: "f0-e0", PositionKey: afterBlackBack.PositionKey(), RepeatedPosition: true},
+		{Side: SideRed, Move: "e8-d8", PositionKey: afterBreakRedOut.PositionKey()},
+		{Side: SideBlack, Move: "e0-d0", PositionKey: afterBreakBlackOut.PositionKey()},
+		{Side: SideRed, Move: "d8-e8", PositionKey: afterBreakRedBack.PositionKey()},
+		{Side: SideBlack, Move: "d0-e0", PositionKey: afterBreakBlackBack.PositionKey()},
+	}
+
+	if !slicesContains(g.LegalMoveStrings(), "e8-f8") {
+		t.Fatalf("expected chain reset to keep e8-f8 legal, got %v", g.LegalMoveStrings())
+	}
+	if err := g.Apply("e8-f8"); err != nil {
+		t.Fatalf("expected chain reset to allow idle move, got %v", err)
+	}
+}
+
 func TestGameStateApplyRejectsForbiddenLongCheckRepetition(t *testing.T) {
 	base := GameState{
 		Board: boardFromRows([]string{
