@@ -1,3 +1,7 @@
+import { formatCommentaryLog } from "./commentary.mjs";
+import { buildPieceModels, createAnimationController, deriveBoardTransition } from "./board-animation.mjs";
+import { classifyBoardSoundEvent, createBoardAudioController } from "./board-audio.mjs";
+
 "use strict";
 
 const POLL_INTERVAL_MS = 2000;
@@ -8,6 +12,7 @@ const STORAGE_KEYS = {
   displayName: "arena.displayName",
   joinIntent: "arena.joinIntent",
   currentView: "arena.currentView",
+  showRawLog: "arena.showRawLog",
 };
 
 const state = {
@@ -31,6 +36,14 @@ const state = {
   hostSettingsDirty: false,
   hostSeatDirty: {},
   hostSeatAPIKeyCache: {},
+  showRawLog: false,
+  boardBaseRows: [],
+  boardPieceModels: [],
+  lastAnimatedMove: "",
+  lastRenderedMatchStatus: "",
+  boardAnimationController: createAnimationController(),
+  boardAnimationTimers: [],
+  boardAudio: createBoardAudioController(),
 };
 
 const dom = {
@@ -57,8 +70,11 @@ const dom = {
   stageTitle: null,
   turnPill: null,
   boardGrid: null,
+  boardPieceLayer: null,
   selectionHint: null,
   eventList: null,
+  rawLogToggleWrap: null,
+  rawLogToggle: null,
   participantList: null,
   picoclawRuntimeList: null,
   clearSelectionButton: null,
@@ -507,6 +523,282 @@ function parseMove(move) {
   };
 }
 
+function parseSquare(square) {
+  const raw = String(square || "").trim().toLowerCase();
+  if (raw.length !== 2) {
+    return null;
+  }
+  return {
+    col: raw.charCodeAt(0) - 97,
+    row: Number(raw[1]),
+  };
+}
+
+function clearBoardAnimationTimers() {
+  while (state.boardAnimationTimers.length > 0) {
+    const timer = state.boardAnimationTimers.pop();
+    window.clearTimeout(timer);
+  }
+}
+
+function scheduleBoardTimer(callback, delay) {
+  const timer = window.setTimeout(() => {
+    state.boardAnimationTimers = state.boardAnimationTimers.filter((value) => value !== timer);
+    callback();
+  }, delay);
+  state.boardAnimationTimers.push(timer);
+  return timer;
+}
+
+function cloneBoardRows(rows) {
+  return Array.isArray(rows) ? rows.map((row) => String(row || ".........")) : [];
+}
+
+function sameBoardRows(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+    return false;
+  }
+  for (let i = 0; i < left.length; i += 1) {
+    if (left[i] !== right[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function currentMatchBoardRows() {
+  return state.publicMatch && Array.isArray(state.publicMatch.board_rows)
+    ? cloneBoardRows(state.publicMatch.board_rows)
+    : [];
+}
+
+function getBoardMetrics() {
+  if (!dom.boardPieceLayer) {
+    return null;
+  }
+  const rect = dom.boardPieceLayer.getBoundingClientRect();
+  if (!rect.width || !rect.height) {
+    return null;
+  }
+  return {
+    width: rect.width,
+    height: rect.height,
+    cellWidth: rect.width / 9,
+    cellHeight: rect.height / 10,
+  };
+}
+
+function centerForSquare(square, metrics) {
+  const parsed = parseSquare(square);
+  const col = parsed ? parsed.col : -1;
+  const row = parsed ? parsed.row : -1;
+  if (!metrics || row < 0 || col < 0) {
+    return null;
+  }
+  return {
+    x: col * metrics.cellWidth + metrics.cellWidth / 2,
+    y: row * metrics.cellHeight + metrics.cellHeight / 2,
+  };
+}
+
+function createPieceElement(model, extraClass) {
+  const piece = document.createElement("span");
+  const isRed = model.piece === model.piece.toUpperCase();
+  piece.className = "board-piece " + (isRed ? "red" : "black") + (extraClass ? " " + extraClass : "");
+  piece.textContent = pieceDisplayLabel(model.piece);
+  piece.title = model.piece;
+  piece.dataset.square = model.square;
+  piece.dataset.pieceId = model.id;
+  return piece;
+}
+
+function positionPieceElement(element, square, metrics) {
+  const center = centerForSquare(square, metrics);
+  if (!center) {
+    return;
+  }
+  const size = Math.min(metrics.cellWidth * 0.82, 50);
+  element.style.left = `${center.x}px`;
+  element.style.top = `${center.y}px`;
+  element.style.width = `${size}px`;
+  element.style.height = `${size}px`;
+  element.style.fontSize = `${Math.max(20, size * 0.58)}px`;
+}
+
+function renderStablePieceLayer(models, excludedSquares = []) {
+  if (!dom.boardPieceLayer) {
+    return;
+  }
+  const metrics = getBoardMetrics();
+  if (!metrics) {
+    return;
+  }
+  const excluded = new Set(excludedSquares);
+  dom.boardPieceLayer.innerHTML = "";
+  models
+    .filter((model) => !excluded.has(model.square))
+    .forEach((model) => {
+      const piece = createPieceElement(model);
+      positionPieceElement(piece, model.square, metrics);
+      dom.boardPieceLayer.appendChild(piece);
+    });
+}
+
+function commitBoardSnapshot(match) {
+  const rows = match && Array.isArray(match.board_rows) ? cloneBoardRows(match.board_rows) : [];
+  state.boardBaseRows = rows;
+  state.boardPieceModels = buildPieceModels(rows);
+  state.lastAnimatedMove = match && match.last_move ? String(match.last_move) : "";
+  state.lastRenderedMatchStatus = match && match.status ? String(match.status) : "";
+}
+
+async function maybeUnlockBoardAudio() {
+  try {
+    await state.boardAudio.unlock();
+  } catch (_err) {
+    // Ignore audio unlock failures. Visuals should still work.
+  }
+}
+
+function playBoardSound(eventName) {
+  void state.boardAudio.play(eventName);
+}
+
+function flushPendingBoardSnapshot() {
+  const pending = state.boardAnimationController.clearPendingSnapshot();
+  if (!pending) {
+    return;
+  }
+  state.publicMatch = pending;
+  syncBoardPresentation();
+  renderBoard();
+  renderPieceLayer();
+}
+
+function finishBoardAnimation(nextMatch) {
+  clearBoardAnimationTimers();
+  state.boardAnimationController.finish();
+  commitBoardSnapshot(nextMatch);
+  renderPieceLayer();
+  flushPendingBoardSnapshot();
+}
+
+function startBoardAnimation(nextMatch, transition) {
+  if (!dom.boardPieceLayer) {
+    commitBoardSnapshot(nextMatch);
+    return;
+  }
+  const metrics = getBoardMetrics();
+  if (!metrics) {
+    commitBoardSnapshot(nextMatch);
+    return;
+  }
+
+  clearBoardAnimationTimers();
+  state.boardAnimationController.start(transition);
+  renderStablePieceLayer(state.boardPieceModels, [transition.from]);
+
+  const movingPiece = createPieceElement(
+    {
+      id: `moving-${transition.move}`,
+      piece: transition.piece,
+      square: transition.from,
+    },
+    "is-moving"
+  );
+  positionPieceElement(movingPiece, transition.from, metrics);
+  dom.boardPieceLayer.appendChild(movingPiece);
+
+  playBoardSound(
+    classifyBoardSoundEvent({
+      capture: transition.capture,
+      finished: nextMatch && nextMatch.status === "finished",
+    })
+  );
+
+  window.requestAnimationFrame(() => {
+    positionPieceElement(movingPiece, transition.to, metrics);
+  });
+
+  scheduleBoardTimer(() => {
+    if (transition.capture) {
+      const captured = dom.boardPieceLayer.querySelector(`[data-square="${transition.to}"]`);
+      if (captured instanceof HTMLElement) {
+        captured.classList.add("is-captured");
+      }
+    }
+  }, 160);
+
+  scheduleBoardTimer(() => {
+    finishBoardAnimation(nextMatch);
+  }, 280);
+}
+
+function syncBoardPresentation() {
+  const match = state.publicMatch;
+  const nextRows = currentMatchBoardRows();
+  if (!match || nextRows.length === 0) {
+    state.boardBaseRows = [];
+    state.boardPieceModels = [];
+    state.lastAnimatedMove = "";
+    state.lastRenderedMatchStatus = "";
+    state.boardAnimationController.finish();
+    clearBoardAnimationTimers();
+    if (dom.boardPieceLayer) {
+      dom.boardPieceLayer.innerHTML = "";
+    }
+    return;
+  }
+
+  if (state.boardBaseRows.length === 0) {
+    commitBoardSnapshot(match);
+    return;
+  }
+
+  if (state.boardAnimationController.isActive()) {
+    if (!sameBoardRows(nextRows, state.boardBaseRows) || String(match.last_move || "") !== state.lastAnimatedMove) {
+      state.boardAnimationController.queueSnapshot({
+        ...match,
+        board_rows: cloneBoardRows(match.board_rows),
+      });
+    }
+    return;
+  }
+
+  const boardChanged = !sameBoardRows(nextRows, state.boardBaseRows);
+  const moveChanged = String(match.last_move || "") !== state.lastAnimatedMove;
+
+  if (boardChanged && moveChanged && match.last_move) {
+    const transition = deriveBoardTransition(state.boardBaseRows, nextRows, match.last_move);
+    if (transition) {
+      startBoardAnimation(
+        {
+          ...match,
+          board_rows: cloneBoardRows(match.board_rows),
+        },
+        transition
+      );
+      return;
+    }
+  }
+
+  const priorStatus = state.lastRenderedMatchStatus;
+  commitBoardSnapshot(match);
+  if (priorStatus !== "finished" && match.status === "finished") {
+    playBoardSound(classifyBoardSoundEvent({ capture: false, finished: true }));
+  }
+}
+
+function renderPieceLayer() {
+  if (!dom.boardPieceLayer) {
+    return;
+  }
+  if (state.boardAnimationController.isActive()) {
+    return;
+  }
+  renderStablePieceLayer(state.boardPieceModels);
+}
+
 function legalMoveMap() {
   const result = {
     byFrom: {},
@@ -573,36 +865,35 @@ function renderBoard() {
   const selectedTargets = state.selectedFrom ? legal.byFrom[state.selectedFrom] || [] : [];
 
   const boardRows =
-    state.publicMatch && Array.isArray(state.publicMatch.board_rows)
-      ? state.publicMatch.board_rows
+    state.boardBaseRows && state.boardBaseRows.length > 0
+      ? state.boardBaseRows
       : Array(10).fill(".........");
+  const lastMove = state.publicMatch ? parseMove(state.publicMatch.last_move || "") : null;
 
   for (let row = 0; row < 10; row += 1) {
     const rowText = boardRows[row] || ".........";
     for (let col = 0; col < 9; col += 1) {
-      const piece = rowText[col] || ".";
       const cell = document.createElement("div");
       cell.className = "board-cell";
       cell.dataset.row = String(row);
       cell.dataset.col = String(col);
       cell.dataset.square = squareForCoords(row, col);
       if (state.selectedFrom && cell.dataset.square === state.selectedFrom) {
-        cell.classList.add("selected-from");
+        cell.classList.add("is-selected");
       }
       if (legal.byFrom[cell.dataset.square]) {
-        cell.classList.add("legal-from");
+        cell.classList.add("is-clickable");
       }
       if (selectedTargets.includes(cell.dataset.square)) {
-        cell.classList.add("legal-target");
+        cell.classList.add("is-legal-target");
       }
-
-      if (piece !== ".") {
-        const chip = document.createElement("span");
-        const isRed = piece === piece.toUpperCase();
-        chip.className = "piece-chip " + (isRed ? "red" : "black");
-        chip.textContent = pieceDisplayLabel(piece);
-        chip.title = piece;
-        cell.appendChild(chip);
+      if (lastMove) {
+        if (cell.dataset.square === lastMove.from) {
+          cell.classList.add("is-last-from");
+        }
+        if (cell.dataset.square === lastMove.to) {
+          cell.classList.add("is-last-to");
+        }
       }
       dom.boardGrid.appendChild(cell);
     }
@@ -612,6 +903,12 @@ function renderBoard() {
 function renderEvents() {
   if (!dom.eventList) {
     return;
+  }
+  if (dom.rawLogToggleWrap) {
+    dom.rawLogToggleWrap.hidden = false;
+  }
+  if (dom.rawLogToggle) {
+    dom.rawLogToggle.checked = Boolean(state.showRawLog);
   }
   const logs = state.publicMatch && Array.isArray(state.publicMatch.logs) ? state.publicMatch.logs : [];
   if (logs.length === 0) {
@@ -625,17 +922,18 @@ function renderEvents() {
     .reverse()
     .slice(0, 40)
     .map((log) => {
+      const view = formatCommentaryLog(log, { showRawReply: state.showRawLog });
       const at = log.time ? new Date(log.time).toLocaleTimeString() : "--:--:--";
       const side = log.side ? sideLabel(log.side) : "系统";
-      const reply = log.reply ? '<p class="event-reply">' + escapeHTML(log.reply) + "</p>" : "";
-      const error = log.error ? '<p class="event-error">' + escapeHTML(log.error) + "</p>" : "";
+      const reply = view.replyText ? '<p class="event-reply">' + escapeHTML(view.replyText) + "</p>" : "";
+      const error = view.errorText ? '<p class="event-error">' + escapeHTML(view.errorText) + "</p>" : "";
       return (
         '<article class="event-item"><header><strong>' +
         escapeHTML(side) +
         "</strong><span>" +
         escapeHTML(at) +
         '</span></header><p class="event-message">' +
-        escapeHTML(log.message || "") +
+        escapeHTML(view.messageText || "") +
         "</p>" +
         reply +
         error +
@@ -1246,7 +1544,9 @@ function renderSummary() {
   const seats = room && room.seats ? room.seats : {};
   renderSeatCard(dom.seatRedCard, "red_player", seats.red_player);
   renderSeatCard(dom.seatBlackCard, "black_player", seats.black_player);
+  syncBoardPresentation();
   renderBoard();
+  renderPieceLayer();
   renderEvents();
   renderParticipants();
   renderPicoclawRuntime();
@@ -1386,8 +1686,11 @@ function cacheDomElements() {
   dom.stageTitle = document.getElementById("stage-title");
   dom.turnPill = document.getElementById("turn-pill");
   dom.boardGrid = document.getElementById("board-grid");
+  dom.boardPieceLayer = document.getElementById("board-piece-layer");
   dom.selectionHint = document.getElementById("selection-hint");
   dom.eventList = document.getElementById("event-list");
+  dom.rawLogToggleWrap = document.getElementById("raw-log-toggle-wrap");
+  dom.rawLogToggle = document.getElementById("raw-log-toggle");
   dom.participantList = document.getElementById("participant-list");
   dom.picoclawRuntimeList = document.getElementById("picoclaw-runtime-list");
   dom.clearSelectionButton = document.getElementById("clear-selection-btn");
@@ -1416,6 +1719,7 @@ function hydratePersistedDefaults() {
   state.displayName = loadStoredValue(STORAGE_KEYS.displayName, "");
   state.joinIntent = loadStoredValue(STORAGE_KEYS.joinIntent, "spectator");
   state.currentView = loadStoredValue(STORAGE_KEYS.currentView, "board");
+  state.showRawLog = loadStoredValue(STORAGE_KEYS.showRawLog, "") === "true";
 
   if (dom.roomCodeInput) {
     dom.roomCodeInput.value = persistedRoomCode;
@@ -1426,12 +1730,30 @@ function hydratePersistedDefaults() {
   if (dom.joinIntentSelect) {
     dom.joinIntentSelect.value = state.joinIntent;
   }
+  if (dom.rawLogToggle) {
+    dom.rawLogToggle.checked = state.showRawLog;
+  }
 }
 
 function bindEvents() {
   dom.viewButtons.forEach((button) => {
     button.addEventListener("click", () => applyViewMode(button.dataset.view));
   });
+
+  document.addEventListener("pointerdown", () => {
+    void maybeUnlockBoardAudio();
+  }, { once: true });
+  document.addEventListener("keydown", () => {
+    void maybeUnlockBoardAudio();
+  }, { once: true });
+
+  if (dom.rawLogToggle) {
+    dom.rawLogToggle.addEventListener("change", () => {
+      state.showRawLog = Boolean(dom.rawLogToggle.checked);
+      saveStoredValue(STORAGE_KEYS.showRawLog, state.showRawLog ? "true" : "false");
+      renderEvents();
+    });
+  }
 
   if (dom.clearSelectionButton) {
     dom.clearSelectionButton.addEventListener("click", () => {

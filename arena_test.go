@@ -640,6 +640,65 @@ func TestAskPicoclawForMoveWithRetryStopsOnInvalidJSON(t *testing.T) {
 	}
 }
 
+func TestAskPicoclawForMoveWithRetryReturnsRepetitionErrorForRejectedMove(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, picoMessageResponse{Reply: "MOVE: e2-e1"})
+	}))
+	defer server.Close()
+
+	base := GameState{
+		Board: boardFromRows([]string{
+			"....k....",
+			".........",
+			"....R....",
+			".........",
+			".........",
+			".........",
+			".........",
+			".........",
+			".........",
+			"....K....",
+		}),
+		Side:   SideRed,
+		Status: "playing",
+	}
+	afterRedCheck := stateAfterMove(t, base, "e2-e1")
+	afterBlackOut := stateAfterMove(t, afterRedCheck, "e0-f0")
+	afterRedBack := stateAfterMove(t, afterBlackOut, "e1-e2")
+	afterBlackBack := stateAfterMove(t, afterRedBack, "f0-e0")
+
+	state := base
+	state.RuleTraces = []RuleTrace{
+		{Side: SideRed, Move: "e2-e1", PositionKey: afterRedCheck.PositionKey(), GivesCheck: true},
+		{Side: SideBlack, Move: "e0-f0", PositionKey: afterBlackOut.PositionKey()},
+		{Side: SideRed, Move: "e1-e2", PositionKey: afterRedBack.PositionKey()},
+		{Side: SideBlack, Move: "f0-e0", PositionKey: afterBlackBack.PositionKey()},
+		{Side: SideRed, Move: "e2-e1", PositionKey: afterRedCheck.PositionKey(), GivesCheck: true, RepeatedPosition: true},
+		{Side: SideBlack, Move: "e0-f0", PositionKey: afterBlackOut.PositionKey(), RepeatedPosition: true},
+		{Side: SideRed, Move: "e1-e2", PositionKey: afterRedBack.PositionKey(), RepeatedPosition: true},
+		{Side: SideBlack, Move: "f0-e0", PositionKey: afterBlackBack.PositionKey(), RepeatedPosition: true},
+	}
+
+	_, reply, _, meta, err := askPicoclawForMoveWithRetry(
+		context.Background(),
+		defaultHTTPClient(),
+		"repeat-match",
+		PlayerConfig{Name: "黑雨伞", BaseURL: server.URL},
+		state,
+		state.LegalMoveStrings(),
+		PromptArenaState{RoomCode: "repeat-room", StepIntervalMS: 1, OpponentAlias: "红灯笼"},
+	)
+	if err == nil || err.Error() != "move causes forbidden long-check repetition" {
+		t.Fatalf("expected long-check repetition error, got %v", err)
+	}
+	if reply != "MOVE: e2-e1" {
+		t.Fatalf("expected raw reply to be preserved, got %q", reply)
+	}
+	if meta.Attempts != 1 {
+		t.Fatalf("expected non-retryable repetition error, got attempts=%d", meta.Attempts)
+	}
+}
+
 func TestArenaAdvanceOnceFallsBackFromSessionToMessage(t *testing.T) {
 	store := NewMemorySnapshotStore()
 	arena := NewArena(store)

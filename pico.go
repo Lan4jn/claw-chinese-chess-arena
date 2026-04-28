@@ -131,9 +131,9 @@ func askPicoclawForMoveWithRequest(ctx context.Context, client *http.Client, mat
 	if decoded.Error != "" {
 		return "", decoded.Reply, payload, fmt.Errorf("%s", decoded.Error)
 	}
-	move := extractMove(decoded.Reply, legal)
-	if move == "" {
-		return "", decoded.Reply, payload, fmt.Errorf("picoclaw reply did not contain a legal move")
+	move, moveErr := resolveReplyMove(decoded.Reply, legal, state)
+	if moveErr != nil {
+		return "", decoded.Reply, payload, moveErr
 	}
 	return move, decoded.Reply, payload, nil
 }
@@ -307,6 +307,31 @@ func extractMove(reply string, legal []string) string {
 		}
 	}
 	return ""
+}
+
+func extractCandidateMove(reply string) string {
+	matches := movePattern.FindAllString(strings.ToLower(reply), -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	return matches[0]
+}
+
+func resolveReplyMove(reply string, legal []string, state GameState) (string, error) {
+	if move := extractMove(reply, legal); move != "" {
+		return move, nil
+	}
+
+	candidate := extractCandidateMove(reply)
+	if candidate == "" {
+		return "", fmt.Errorf("picoclaw reply did not contain a legal move")
+	}
+
+	next := state
+	if err := next.Apply(candidate); err != nil {
+		return "", err
+	}
+	return candidate, nil
 }
 
 func normalizePicoMessageURL(raw string) (string, error) {

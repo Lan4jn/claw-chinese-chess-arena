@@ -109,6 +109,7 @@ func (a *Arena) requestManagedWSMove(matchID string, participantID string, playe
 		sessionID,
 		buildMovePrompt(matchID, player, state, legal, arenaState),
 		legal,
+		state,
 	)
 
 	now := time.Now()
@@ -149,7 +150,7 @@ func (a *Arena) requestManagedWSMove(matchID string, participantID string, playe
 	return move, reply, err
 }
 
-func (c *picoclawWSClient) requestMove(ctx context.Context, endpoint, token, sessionID, prompt string, legal []string) (string, string, string, time.Time, time.Time, error) {
+func (c *picoclawWSClient) requestMove(ctx context.Context, endpoint, token, sessionID, prompt string, legal []string, state GameState) (string, string, string, time.Time, time.Time, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -192,8 +193,10 @@ func (c *picoclawWSClient) requestMove(ctx context.Context, endpoint, token, ses
 		switch msg.Type {
 		case "message.create", "message.update":
 			content, _ := msg.Payload["content"].(string)
-			if move := extractMove(content, legal); move != "" {
+			if move, err := resolveReplyMove(content, legal, state); err == nil {
 				return move, content, c.authMode, c.connectedAt, recvAt, nil
+			} else if extractCandidateMove(content) != "" {
+				return "", content, c.authMode, c.connectedAt, recvAt, err
 			}
 		case "error":
 			payload, _ := json.Marshal(msg.Payload)
