@@ -1959,6 +1959,43 @@ func TestSnapshotPersistsPicoclawRuntimeState(t *testing.T) {
 	}
 }
 
+func TestSnapshotPreservesHostIdentityByClientToken(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+	defer arena.Close()
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    "host-refresh-room",
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("Enter(host) error = %v", err)
+	}
+	if !hostView.IsHost {
+		t.Fatalf("expected creator to be host before reload")
+	}
+
+	reloaded := NewArena(store)
+	defer reloaded.Close()
+
+	reenterView, err := reloaded.Enter(EnterRequest{
+		RoomCode:    "host-refresh-room",
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+		RoomAction:  RoomActionJoin,
+	})
+	if err != nil {
+		t.Fatalf("Enter(host after reload) error = %v", err)
+	}
+	if !reenterView.IsHost {
+		t.Fatalf("expected creator to remain host after reload")
+	}
+	if _, err := reloaded.HostRoom("host-refresh-room", "host-token"); err != nil {
+		t.Fatalf("HostRoom() with persisted host token error = %v", err)
+	}
+}
+
 func TestHostCanChangePicoclawPreferredMode(t *testing.T) {
 	store := NewMemorySnapshotStore()
 	arena := NewArena(store)

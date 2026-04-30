@@ -179,10 +179,13 @@ func (g GameState) repetitionViolationForMove(mv Move) string {
 		return ""
 	}
 	effects := g.classifyMoveEffects(mv)
-	if !effects.RepeatedPosition {
+	if effects.IsCapture {
 		return ""
 	}
-	if effects.IsCapture {
+	if g.isShuttleRepetition(mv, effects) {
+		return "move causes forbidden shuttle repetition"
+	}
+	if !effects.RepeatedPosition {
 		return ""
 	}
 	if g.isLongCheckRepetition(g.Side, effects) {
@@ -382,6 +385,51 @@ func (g GameState) isLongChaseRepetition(effects moveEffects) bool {
 		}
 	}
 	return false
+}
+
+func (g GameState) isShuttleRepetition(mv Move, effects moveEffects) bool {
+	if effects.IsCapture || effects.GivesCheck || len(effects.ChaseTargets) > 0 {
+		return false
+	}
+	piece := g.Board[mv.FromY][mv.FromX]
+	if piece == 0 {
+		return false
+	}
+
+	const ownMoveWindow = 8
+	const priorEdgeLimit = 3
+
+	ownMoves := 0
+	matches := 0
+	for i := len(g.History) - 1; i >= 0; i-- {
+		record := g.History[i]
+		if record.Side != g.Side {
+			continue
+		}
+		ownMoves++
+		if ownMoves > ownMoveWindow {
+			break
+		}
+		if record.Capture != "" || record.Piece != string(piece) {
+			continue
+		}
+		previous, err := ParseMove(record.Move)
+		if err != nil {
+			continue
+		}
+		if sameMoveEdge(previous, mv) {
+			matches++
+			if matches >= priorEdgeLimit {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sameMoveEdge(left, right Move) bool {
+	return (left.FromX == right.FromX && left.FromY == right.FromY && left.ToX == right.ToX && left.ToY == right.ToY) ||
+		(left.FromX == right.ToX && left.FromY == right.ToY && left.ToX == right.FromX && left.ToY == right.FromY)
 }
 
 func equalSortedStrings(left, right []string) bool {

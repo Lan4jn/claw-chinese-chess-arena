@@ -55,12 +55,12 @@ const (
 
 type Participant struct {
 	ID          string    `json:"id"`
-	Token       string    `json:"-"`
+	Token       string    `json:"token,omitempty"`
 	PublicAlias string    `json:"public_alias"`
 	RealType    string    `json:"real_type,omitempty"`
 	DisplayName string    `json:"display_name,omitempty"`
 	BaseURL     string    `json:"base_url,omitempty"`
-	APIKey      string    `json:"-"`
+	APIKey      string    `json:"api_key,omitempty"`
 	Seat        SeatType  `json:"seat"`
 	Connection  string    `json:"connection"`
 	JoinedAt    time.Time `json:"joined_at"`
@@ -76,7 +76,7 @@ type Seat struct {
 
 type ArenaRoom struct {
 	Code              string                          `json:"code"`
-	OwnerToken        string                          `json:"-"`
+	OwnerToken        string                          `json:"owner_token,omitempty"`
 	HostParticipantID string                          `json:"host_participant_id"`
 	Status            ArenaRoomStatus                 `json:"status"`
 	StepIntervalMS    int                             `json:"step_interval_ms"`
@@ -1237,7 +1237,8 @@ func isCorrectableAgentMoveError(err error) bool {
 	switch err.Error() {
 	case "move causes forbidden long-check repetition",
 		"move causes forbidden long-chase repetition",
-		"move causes forbidden idle repetition":
+		"move causes forbidden idle repetition",
+		"move causes forbidden shuttle repetition":
 		return true
 	}
 	return strings.Contains(err.Error(), " is not a legal move for ")

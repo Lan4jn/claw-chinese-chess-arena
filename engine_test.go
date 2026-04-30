@@ -339,6 +339,43 @@ func TestGameStateApplyRejectsForbiddenLongChaseRepetition(t *testing.T) {
 	}
 }
 
+func TestGameStateApplyRejectsRepeatedSameSideShuttleMove(t *testing.T) {
+	g := GameState{
+		Board: boardFromRows([]string{
+			"....k.p..",
+			".........",
+			".........",
+			".........",
+			"....P....",
+			".........",
+			".........",
+			".........",
+			".......R.",
+			"....K....",
+		}),
+		Side:   SideRed,
+		Status: "playing",
+		History: []MoveRecord{
+			{Side: SideRed, Move: "h8-h0", Piece: "R"},
+			{Side: SideBlack, Move: "e0-f0", Piece: "k"},
+			{Side: SideRed, Move: "h0-h8", Piece: "R"},
+			{Side: SideBlack, Move: "f0-e0", Piece: "k"},
+			{Side: SideRed, Move: "h8-h0", Piece: "R"},
+			{Side: SideBlack, Move: "e0-f0", Piece: "k"},
+			{Side: SideRed, Move: "h0-h8", Piece: "R"},
+			{Side: SideBlack, Move: "f0-e0", Piece: "k"},
+		},
+	}
+
+	if slicesContains(g.LegalMoveStrings(), "h8-h0") {
+		t.Fatalf("expected repeated shuttle move h8-h0 to be filtered out, got %v", g.LegalMoveStrings())
+	}
+	err := g.Apply("h8-h0")
+	if err == nil || err.Error() != "move causes forbidden shuttle repetition" {
+		t.Fatalf("expected forbidden shuttle repetition, got %v", err)
+	}
+}
+
 func TestGameStateApplyKeepsOrdinaryIllegalMoveErrorOutsideRepetitionFilter(t *testing.T) {
 	base := GameState{
 		Board: boardFromRows([]string{

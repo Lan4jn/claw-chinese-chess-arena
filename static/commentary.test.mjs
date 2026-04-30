@@ -76,9 +76,23 @@ test("humanizes rejected move and retry request logs", () => {
     },
     { showRawReply: false, moveStyle: "hybrid", analysisIntensity: "auto" }
   );
+  const shuttle = formatCommentaryLog(
+    {
+      type: "agent_move_rejected",
+      side: "red",
+      move: "h8-h0",
+      notation: "车2进8",
+      plain: "红方把边路的车拉回底线。",
+      error: "move causes forbidden shuttle repetition",
+      correction_attempt: 1,
+      correction_limit: 3,
+    },
+    { showRawReply: false, moveStyle: "hybrid", analysisIntensity: "auto" }
+  );
 
   assert.equal(rejected.messageText, "黑方刚才尝试走出车5进1，把中路的车继续往前压，但这步棋没有被裁判允许。 这步棋会形成长将重复，裁判系统已驳回。");
   assert.equal(retrying.messageText, "系统已经通知黑方重新选择下一手，目前进入本回合第 2/3 次尝试。");
+  assert.equal(shuttle.messageText, "红方刚才尝试走出车2进8，把边路的车拉回底线，但这步棋没有被裁判允许。 这步棋会形成同一棋子反复往返，裁判系统已驳回。");
 });
 
 test("keeps raw reply and raw error when raw mode is enabled", () => {

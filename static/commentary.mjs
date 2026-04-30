@@ -97,6 +97,8 @@ function humanizeError(error) {
       return "这步棋会形成长捉重复，裁判系统已驳回。";
     case "move causes forbidden idle repetition":
       return "这步棋会形成闲着循环，裁判系统已驳回。";
+    case "move causes forbidden shuttle repetition":
+      return "这步棋会形成同一棋子反复往返，裁判系统已驳回。";
     default:
       return raw ? "选手响应暂时异常，本回合请求未成功完成。" : "";
   }
