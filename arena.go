@@ -188,11 +188,21 @@ type PublicMatchView struct {
 }
 
 type MatchLogView struct {
-	Time    time.Time `json:"time"`
-	Side    Side      `json:"side,omitempty"`
-	Message string    `json:"message"`
-	Error   string    `json:"error,omitempty"`
-	Reply   string    `json:"reply,omitempty"`
+	Time              time.Time `json:"time"`
+	Side              Side      `json:"side,omitempty"`
+	Type              string    `json:"type,omitempty"`
+	Message           string    `json:"message"`
+	Error             string    `json:"error,omitempty"`
+	Reply             string    `json:"reply,omitempty"`
+	Move              string    `json:"move,omitempty"`
+	Piece             string    `json:"piece,omitempty"`
+	Notation          string    `json:"notation,omitempty"`
+	Plain             string    `json:"plain,omitempty"`
+	Capture           string    `json:"capture,omitempty"`
+	GivesCheck        bool      `json:"gives_check,omitempty"`
+	CorrectionAttempt int       `json:"correction_attempt,omitempty"`
+	CorrectionLimit   int       `json:"correction_limit,omitempty"`
+	Mode              string    `json:"mode,omitempty"`
 }
 
 type HostMatchView struct {
@@ -1192,9 +1202,19 @@ func buildHostMatchView(room *ArenaRoom) HostMatchView {
 }
 
 type picoclawMoveAttempt struct {
-	Mode  PicoclawActiveMode
-	Reply string
-	Err   error
+	Mode             PicoclawActiveMode
+	Reply            string
+	Err              error
+	TransportHealthy bool
+}
+
+type agentCorrectionRecord struct {
+	Mode    PicoclawActiveMode
+	Move    string
+	Reply   string
+	Err     error
+	Attempt int
+	Limit   int
 }
 
 func seatTypeForSide(side Side) SeatType {
@@ -1206,6 +1226,37 @@ func seatTypeForSide(side Side) SeatType {
 
 func buildPicoclawSessionTurnID(matchID string, side Side, moveCount int) string {
 	return fmt.Sprintf("%s-%s-%d", matchID, side, moveCount)
+}
+
+const maxAgentCorrectionAttempts = 3
+
+func isCorrectableAgentMoveError(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch err.Error() {
+	case "move causes forbidden long-check repetition",
+		"move causes forbidden long-chase repetition",
+		"move causes forbidden idle repetition":
+		return true
+	}
+	return strings.Contains(err.Error(), " is not a legal move for ")
+}
+
+func withCorrectionPrompt(base PromptArenaState, move string, err error, attempt int, limit int) PromptArenaState {
+	base.IsCorrection = true
+	base.RejectedMove = strings.TrimSpace(move)
+	if err != nil {
+		base.RejectionReason = err.Error()
+	}
+	base.CorrectionAttempt = attempt
+	base.CorrectionLimit = limit
+	return base
+}
+
+func validateAgentCandidateMove(state GameState, move string) error {
+	next := state
+	return next.Apply(move)
 }
 
 func (a *Arena) requestManagedSessionMove(matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
@@ -1333,9 +1384,9 @@ func applyPicoclawTurnOutcome(runtime PicoclawRuntimeState, attempts []picoclawM
 		return runtime
 	}
 	for _, attempt := range attempts {
-		runtime = updatePicoclawFailureCount(runtime, attempt.Mode, attempt.Err == nil)
+		runtime = updatePicoclawFailureCount(runtime, attempt.Mode, attempt.TransportHealthy)
 		if attempt.Mode == PicoclawActiveModePicoWS {
-			if attempt.Err == nil {
+			if attempt.TransportHealthy {
 				runtime.WSState = PicoclawWSStateActive
 				runtime.WSLastError = ""
 			} else if runtime.WSHealthy(now) {
@@ -1347,7 +1398,7 @@ func applyPicoclawTurnOutcome(runtime PicoclawRuntimeState, attempts []picoclawM
 			}
 		}
 		if attempt.Mode == PicoclawActiveModeSession {
-			if attempt.Err == nil {
+			if attempt.TransportHealthy {
 				runtime.SessionState = PicoclawSessionStateActive
 			} else if runtime.SessionHealthy(now) {
 				runtime.SessionState = PicoclawSessionStateRecovering
@@ -1368,25 +1419,76 @@ func applyPicoclawTurnOutcome(runtime PicoclawRuntimeState, attempts []picoclawM
 	return runtime
 }
 
-func (a *Arena) requestPicoclawMove(matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState, runtime PicoclawRuntimeState, now time.Time) (string, string, []picoclawMoveAttempt, error) {
+func (a *Arena) requestMoveWithCorrectionsByMode(mode PicoclawActiveMode, matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, picoclawMoveAttempt, []agentCorrectionRecord, error) {
+	currentPromptState := arenaState
+	corrections := make([]agentCorrectionRecord, 0, maxAgentCorrectionAttempts)
+	for attempt := 1; attempt <= maxAgentCorrectionAttempts; attempt++ {
+		move, reply, err := a.requestMoveByMode(mode, matchID, participantID, player, state, legal, currentPromptState)
+		if err != nil {
+			return "", reply, picoclawMoveAttempt{
+				Mode:             mode,
+				Reply:            reply,
+				Err:              err,
+				TransportHealthy: false,
+			}, corrections, err
+		}
+		if validateErr := validateAgentCandidateMove(state, move); validateErr != nil {
+			if !isCorrectableAgentMoveError(validateErr) {
+				return "", reply, picoclawMoveAttempt{
+					Mode:             mode,
+					Reply:            reply,
+					Err:              validateErr,
+					TransportHealthy: true,
+				}, corrections, validateErr
+			}
+			corrections = append(corrections, agentCorrectionRecord{
+				Mode:    mode,
+				Move:    move,
+				Reply:   reply,
+				Err:     validateErr,
+				Attempt: attempt,
+				Limit:   maxAgentCorrectionAttempts,
+			})
+			if attempt == maxAgentCorrectionAttempts {
+				return "", reply, picoclawMoveAttempt{
+					Mode:             mode,
+					Reply:            reply,
+					Err:              validateErr,
+					TransportHealthy: true,
+				}, corrections, validateErr
+			}
+			currentPromptState = withCorrectionPrompt(arenaState, move, validateErr, attempt, maxAgentCorrectionAttempts)
+			continue
+		}
+		return move, reply, picoclawMoveAttempt{
+			Mode:             mode,
+			Reply:            reply,
+			TransportHealthy: true,
+		}, corrections, nil
+	}
+	return "", "", picoclawMoveAttempt{Mode: mode}, corrections, fmt.Errorf("unreachable correction loop")
+}
+
+func (a *Arena) requestPicoclawMove(matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState, runtime PicoclawRuntimeState, now time.Time) (string, string, []picoclawMoveAttempt, []agentCorrectionRecord, error) {
 	modes := resolvePicoclawAttemptModes(runtime, now)
 	attempts := make([]picoclawMoveAttempt, 0, len(modes))
+	corrections := make([]agentCorrectionRecord, 0, maxAgentCorrectionAttempts)
 	for _, mode := range modes {
-		move, reply, err := a.requestMoveByMode(mode, matchID, participantID, player, state, legal, arenaState)
-		attempts = append(attempts, picoclawMoveAttempt{
-			Mode:  mode,
-			Reply: reply,
-			Err:   err,
-		})
+		move, reply, attempt, correctionEvents, err := a.requestMoveWithCorrectionsByMode(mode, matchID, participantID, player, state, legal, arenaState)
+		attempts = append(attempts, attempt)
+		corrections = append(corrections, correctionEvents...)
 		if err == nil {
-			return move, reply, attempts, nil
+			return move, reply, attempts, corrections, nil
+		}
+		if attempt.TransportHealthy {
+			return "", reply, attempts, corrections, err
 		}
 	}
 	if len(attempts) == 0 {
-		return "", "", nil, fmt.Errorf("no available picoclaw mode")
+		return "", "", nil, nil, fmt.Errorf("no available picoclaw mode")
 	}
 	last := attempts[len(attempts)-1]
-	return "", last.Reply, attempts, fmt.Errorf("all picoclaw modes failed after %d attempts", len(attempts))
+	return "", last.Reply, attempts, corrections, fmt.Errorf("all picoclaw modes failed after %d attempts", len(attempts))
 }
 
 func (a *Arena) advanceRoom(code string) error {
@@ -1433,15 +1535,18 @@ func (a *Arena) advanceRoom(code string) error {
 
 	now := time.Now()
 	var (
-		move     string
-		reply    string
-		err      error
-		attempts []picoclawMoveAttempt
+		move        string
+		reply       string
+		err         error
+		attempts    []picoclawMoveAttempt
+		corrections []agentCorrectionRecord
 	)
 	if useDualPath {
-		move, reply, attempts, err = a.requestPicoclawMove(matchID, participantID, player, state, legal, arenaState, runtimeState, now)
+		move, reply, attempts, corrections, err = a.requestPicoclawMove(matchID, participantID, player, state, legal, arenaState, runtimeState, now)
 	} else {
-		move, reply, err = a.requestMove(matchID, player, state, legal, arenaState)
+		attempt := picoclawMoveAttempt{Mode: PicoclawActiveModeMessage}
+		move, reply, attempt, corrections, err = a.requestMoveWithCorrectionsByMode(PicoclawActiveModeMessage, matchID, participantID, player, state, legal, arenaState)
+		attempts = []picoclawMoveAttempt{attempt}
 	}
 
 	a.mu.Lock()
@@ -1460,7 +1565,7 @@ func (a *Arena) advanceRoom(code string) error {
 			room.PicoclawRuntime[participantID] = currentRuntime
 		}
 		for _, attempt := range attempts {
-			if attempt.Err != nil {
+			if attempt.Err != nil && !attempt.TransportHealthy {
 				match.AppendAgentModeError(side, attempt.Mode, attempt.Reply, attempt.Err)
 			}
 		}
@@ -1469,7 +1574,16 @@ func (a *Arena) advanceRoom(code string) error {
 			match.AppendAgentModeFallback(side, attempts[0].Mode, successMode, reason)
 		}
 	}
+	for _, correction := range corrections {
+		match.AppendAgentMoveRejected(side, correction.Mode, state.Board, correction.Move, correction.Reply, correction.Err, correction.Attempt, correction.Limit)
+		if correction.Attempt < correction.Limit {
+			match.AppendAgentRetryRequested(side, correction.Mode, correction.Attempt+1, correction.Limit)
+		}
+	}
 	if err != nil {
+		if len(corrections) >= maxAgentCorrectionAttempts {
+			match.AppendAgentRetryExhausted(side, attempts[len(attempts)-1].Mode, maxAgentCorrectionAttempts)
+		}
 		if !useDualPath {
 			match.AppendAgentError(side, reply, err)
 		}
@@ -1849,10 +1963,20 @@ func buildLogViews(logs []MatchLog, includeReply bool) []MatchLogView {
 	out := make([]MatchLogView, 0, len(logs))
 	for _, log := range logs {
 		item := MatchLogView{
-			Time:    log.Time,
-			Side:    log.Side,
-			Message: log.Message,
-			Error:   log.Error,
+			Time:              log.Time,
+			Side:              log.Side,
+			Type:              log.Type,
+			Message:           log.Message,
+			Error:             log.Error,
+			Move:              log.Move,
+			Piece:             log.Piece,
+			Notation:          log.Notation,
+			Plain:             log.Plain,
+			Capture:           log.Capture,
+			GivesCheck:        log.GivesCheck,
+			CorrectionAttempt: log.CorrectionAttempt,
+			CorrectionLimit:   log.CorrectionLimit,
+			Mode:              log.Mode,
 		}
 		if includeReply {
 			item.Reply = log.Reply

@@ -34,11 +34,21 @@ type Match struct {
 }
 
 type MatchLog struct {
-	Time    time.Time `json:"time"`
-	Side    Side      `json:"side,omitempty"`
-	Message string    `json:"message"`
-	Reply   string    `json:"reply,omitempty"`
-	Error   string    `json:"error,omitempty"`
+	Time              time.Time `json:"time"`
+	Side              Side      `json:"side,omitempty"`
+	Type              string    `json:"type,omitempty"`
+	Message           string    `json:"message"`
+	Reply             string    `json:"reply,omitempty"`
+	Error             string    `json:"error,omitempty"`
+	Move              string    `json:"move,omitempty"`
+	Piece             string    `json:"piece,omitempty"`
+	Notation          string    `json:"notation,omitempty"`
+	Plain             string    `json:"plain,omitempty"`
+	Capture           string    `json:"capture,omitempty"`
+	GivesCheck        bool      `json:"gives_check,omitempty"`
+	CorrectionAttempt int       `json:"correction_attempt,omitempty"`
+	CorrectionLimit   int       `json:"correction_limit,omitempty"`
+	Mode              string    `json:"mode,omitempty"`
 }
 
 func NewMatch(roomCode string, intervalMS int, players map[Side]PlayerConfig, aliases map[Side]string, participants map[Side]string) (*Match, error) {
@@ -84,15 +94,33 @@ func (m *Match) ApplyHumanMove(side Side, move string) error {
 		return fmt.Errorf("it is not %s's turn", side)
 	}
 	move = strings.TrimSpace(move)
+	beforeBoard := m.State.Board
 	if err := m.State.Apply(move); err != nil {
 		now := time.Now()
 		m.UpdatedAt = now
-		m.appendLog(MatchLog{Time: now, Side: side, Message: "手动走子失败", Error: err.Error()})
+		m.appendLog(MatchLog{Time: now, Side: side, Type: "human_move_failed", Message: "手动走子失败", Error: err.Error(), Move: move})
 		return err
 	}
 	now := time.Now()
 	m.UpdatedAt = now
-	m.appendLog(MatchLog{Time: now, Side: side, Message: "手动走子：" + m.State.LastMove})
+	commentary := buildMoveCommentary(beforeBoard, side, m.State.LastMove)
+	if len(m.State.History) > 0 {
+		last := m.State.History[len(m.State.History)-1]
+		commentary.Piece = last.Piece
+		commentary.Capture = last.Capture
+	}
+	m.appendLog(MatchLog{
+		Time:       now,
+		Side:       side,
+		Type:       "human_move",
+		Message:    "手动走子：" + m.State.LastMove,
+		Move:       commentary.Move,
+		Piece:      commentary.Piece,
+		Notation:   commentary.Notation,
+		Plain:      commentary.Plain,
+		Capture:    commentary.Capture,
+		GivesCheck: m.State.inCheck(m.State.Side),
+	})
 	return nil
 }
 
@@ -104,15 +132,46 @@ func (m *Match) ApplyAgentMove(side Side, move string, reply string) error {
 		return fmt.Errorf("it is not %s's turn", side)
 	}
 	move = strings.TrimSpace(move)
+	beforeBoard := m.State.Board
 	if err := m.State.Apply(move); err != nil {
 		now := time.Now()
 		m.UpdatedAt = now
-		m.appendLog(MatchLog{Time: now, Side: side, Message: "选手返回非法走法：" + move, Reply: reply, Error: err.Error()})
+		commentary := buildMoveCommentary(beforeBoard, side, move)
+		m.appendLog(MatchLog{
+			Time:     now,
+			Side:     side,
+			Type:     "agent_move_invalid",
+			Message:  "选手返回非法走法：" + move,
+			Reply:    reply,
+			Error:    err.Error(),
+			Move:     commentary.Move,
+			Piece:    commentary.Piece,
+			Notation: commentary.Notation,
+			Plain:    commentary.Plain,
+		})
 		return err
 	}
 	now := time.Now()
 	m.UpdatedAt = now
-	m.appendLog(MatchLog{Time: now, Side: side, Message: "选手走子：" + m.State.LastMove, Reply: reply})
+	commentary := buildMoveCommentary(beforeBoard, side, m.State.LastMove)
+	if len(m.State.History) > 0 {
+		last := m.State.History[len(m.State.History)-1]
+		commentary.Piece = last.Piece
+		commentary.Capture = last.Capture
+	}
+	m.appendLog(MatchLog{
+		Time:       now,
+		Side:       side,
+		Type:       "agent_move",
+		Message:    "选手走子：" + m.State.LastMove,
+		Reply:      reply,
+		Move:       commentary.Move,
+		Piece:      commentary.Piece,
+		Notation:   commentary.Notation,
+		Plain:      commentary.Plain,
+		Capture:    commentary.Capture,
+		GivesCheck: m.State.inCheck(m.State.Side),
+	})
 	return nil
 }
 
@@ -122,7 +181,7 @@ func (m *Match) AppendAgentError(side Side, reply string, err error) {
 	}
 	now := time.Now()
 	m.UpdatedAt = now
-	m.appendLog(MatchLog{Time: now, Side: side, Message: "请求选手走子失败", Reply: reply, Error: err.Error()})
+	m.appendLog(MatchLog{Time: now, Side: side, Type: "agent_request_failed", Message: "请求选手走子失败", Reply: reply, Error: err.Error()})
 }
 
 func (m *Match) AppendAgentModeError(side Side, mode PicoclawActiveMode, reply string, err error) {
@@ -134,9 +193,11 @@ func (m *Match) AppendAgentModeError(side Side, mode PicoclawActiveMode, reply s
 	m.appendLog(MatchLog{
 		Time:    now,
 		Side:    side,
+		Type:    "agent_request_failed",
 		Message: fmt.Sprintf("请求选手走子失败（%s 模式）", mode),
 		Reply:   reply,
 		Error:   err.Error(),
+		Mode:    string(mode),
 	})
 }
 
@@ -146,8 +207,58 @@ func (m *Match) AppendAgentModeFallback(side Side, from PicoclawActiveMode, to P
 	m.appendLog(MatchLog{
 		Time:    now,
 		Side:    side,
+		Type:    "agent_mode_fallback",
 		Message: fmt.Sprintf("走子模式切换：%s -> %s", from, to),
 		Reply:   strings.TrimSpace(reason),
+	})
+}
+
+func (m *Match) AppendAgentMoveRejected(side Side, mode PicoclawActiveMode, board Board, move string, reply string, err error, attempt int, limit int) {
+	now := time.Now()
+	m.UpdatedAt = now
+	message := fmt.Sprintf("选手走子被驳回：%s（第 %d/%d 次）", strings.TrimSpace(move), attempt, limit)
+	commentary := buildMoveCommentary(board, side, move)
+	m.appendLog(MatchLog{
+		Time:              now,
+		Side:              side,
+		Type:              "agent_move_rejected",
+		Message:           message,
+		Reply:             reply,
+		Error:             err.Error(),
+		Move:              commentary.Move,
+		Piece:             commentary.Piece,
+		Notation:          commentary.Notation,
+		Plain:             commentary.Plain,
+		CorrectionAttempt: attempt,
+		CorrectionLimit:   limit,
+		Mode:              string(mode),
+	})
+}
+
+func (m *Match) AppendAgentRetryRequested(side Side, mode PicoclawActiveMode, nextAttempt int, limit int) {
+	now := time.Now()
+	m.UpdatedAt = now
+	m.appendLog(MatchLog{
+		Time:              now,
+		Side:              side,
+		Type:              "agent_retry_requested",
+		Message:           fmt.Sprintf("系统要求选手重新走子（%s 模式，第 %d/%d 次）", mode, nextAttempt, limit),
+		CorrectionAttempt: nextAttempt,
+		CorrectionLimit:   limit,
+		Mode:              string(mode),
+	})
+}
+
+func (m *Match) AppendAgentRetryExhausted(side Side, mode PicoclawActiveMode, limit int) {
+	now := time.Now()
+	m.UpdatedAt = now
+	m.appendLog(MatchLog{
+		Time:            now,
+		Side:            side,
+		Type:            "agent_retry_exhausted",
+		Message:         fmt.Sprintf("选手连续%d次提交违规着法（%s 模式）", limit, mode),
+		CorrectionLimit: limit,
+		Mode:            string(mode),
 	})
 }
 

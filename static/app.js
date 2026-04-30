@@ -13,6 +13,8 @@ const STORAGE_KEYS = {
   joinIntent: "arena.joinIntent",
   currentView: "arena.currentView",
   showRawLog: "arena.showRawLog",
+  commentaryMoveStyle: "arena.commentaryMoveStyle",
+  commentaryAnalysisIntensity: "arena.commentaryAnalysisIntensity",
 };
 
 const state = {
@@ -37,6 +39,8 @@ const state = {
   hostSeatDirty: {},
   hostSeatAPIKeyCache: {},
   showRawLog: false,
+  commentaryMoveStyle: "hybrid",
+  commentaryAnalysisIntensity: "auto",
   boardBaseRows: [],
   boardPieceModels: [],
   lastAnimatedMove: "",
@@ -75,6 +79,8 @@ const dom = {
   eventList: null,
   rawLogToggleWrap: null,
   rawLogToggle: null,
+  commentaryMoveStyleSelect: null,
+  commentaryIntensitySelect: null,
   participantList: null,
   picoclawRuntimeList: null,
   clearSelectionButton: null,
@@ -922,7 +928,11 @@ function renderEvents() {
     .reverse()
     .slice(0, 40)
     .map((log) => {
-      const view = formatCommentaryLog(log, { showRawReply: state.showRawLog });
+      const view = formatCommentaryLog(log, {
+        showRawReply: state.showRawLog,
+        moveStyle: state.commentaryMoveStyle,
+        analysisIntensity: state.commentaryAnalysisIntensity,
+      });
       const at = log.time ? new Date(log.time).toLocaleTimeString() : "--:--:--";
       const side = log.side ? sideLabel(log.side) : "系统";
       const reply = view.replyText ? '<p class="event-reply">' + escapeHTML(view.replyText) + "</p>" : "";
@@ -1691,6 +1701,8 @@ function cacheDomElements() {
   dom.eventList = document.getElementById("event-list");
   dom.rawLogToggleWrap = document.getElementById("raw-log-toggle-wrap");
   dom.rawLogToggle = document.getElementById("raw-log-toggle");
+  dom.commentaryMoveStyleSelect = document.getElementById("commentary-move-style-select");
+  dom.commentaryIntensitySelect = document.getElementById("commentary-intensity-select");
   dom.participantList = document.getElementById("participant-list");
   dom.picoclawRuntimeList = document.getElementById("picoclaw-runtime-list");
   dom.clearSelectionButton = document.getElementById("clear-selection-btn");
@@ -1720,6 +1732,8 @@ function hydratePersistedDefaults() {
   state.joinIntent = loadStoredValue(STORAGE_KEYS.joinIntent, "spectator");
   state.currentView = loadStoredValue(STORAGE_KEYS.currentView, "board");
   state.showRawLog = loadStoredValue(STORAGE_KEYS.showRawLog, "") === "true";
+  state.commentaryMoveStyle = loadStoredValue(STORAGE_KEYS.commentaryMoveStyle, "hybrid");
+  state.commentaryAnalysisIntensity = loadStoredValue(STORAGE_KEYS.commentaryAnalysisIntensity, "auto");
 
   if (dom.roomCodeInput) {
     dom.roomCodeInput.value = persistedRoomCode;
@@ -1732,6 +1746,12 @@ function hydratePersistedDefaults() {
   }
   if (dom.rawLogToggle) {
     dom.rawLogToggle.checked = state.showRawLog;
+  }
+  if (dom.commentaryMoveStyleSelect) {
+    dom.commentaryMoveStyleSelect.value = state.commentaryMoveStyle;
+  }
+  if (dom.commentaryIntensitySelect) {
+    dom.commentaryIntensitySelect.value = state.commentaryAnalysisIntensity;
   }
 }
 
@@ -1751,6 +1771,20 @@ function bindEvents() {
     dom.rawLogToggle.addEventListener("change", () => {
       state.showRawLog = Boolean(dom.rawLogToggle.checked);
       saveStoredValue(STORAGE_KEYS.showRawLog, state.showRawLog ? "true" : "false");
+      renderEvents();
+    });
+  }
+  if (dom.commentaryMoveStyleSelect) {
+    dom.commentaryMoveStyleSelect.addEventListener("change", () => {
+      state.commentaryMoveStyle = dom.commentaryMoveStyleSelect.value || "hybrid";
+      saveStoredValue(STORAGE_KEYS.commentaryMoveStyle, state.commentaryMoveStyle);
+      renderEvents();
+    });
+  }
+  if (dom.commentaryIntensitySelect) {
+    dom.commentaryIntensitySelect.addEventListener("change", () => {
+      state.commentaryAnalysisIntensity = dom.commentaryIntensitySelect.value || "auto";
+      saveStoredValue(STORAGE_KEYS.commentaryAnalysisIntensity, state.commentaryAnalysisIntensity);
       renderEvents();
     });
   }

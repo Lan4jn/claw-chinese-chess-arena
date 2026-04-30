@@ -59,10 +59,29 @@
               <p class="label">赛事播报</p>
               <h2>解说台</h2>
             </div>
-            <label class="toggle" id="raw-log-toggle-wrap" hidden>
-              <input type="checkbox" id="raw-log-toggle">
-              <span>显示原始回复</span>
-            </label>
+            <div class="commentary-controls">
+              <label class="mini-field">
+                <span>走子播报</span>
+                <select id="commentary-move-style-select">
+                  <option value="hybrid">混合式</option>
+                  <option value="notation">棋谱式</option>
+                  <option value="plain">口语式</option>
+                </select>
+              </label>
+              <label class="mini-field">
+                <span>分析强度</span>
+                <select id="commentary-intensity-select">
+                  <option value="auto">自动</option>
+                  <option value="conservative">保守</option>
+                  <option value="balanced">中度</option>
+                  <option value="aggressive">强分析</option>
+                </select>
+              </label>
+              <label class="toggle" id="raw-log-toggle-wrap" hidden>
+                <input type="checkbox" id="raw-log-toggle">
+                <span>显示原始回复</span>
+              </label>
+            </div>
           </div>
           <div class="event-list" id="event-list"></div>
         </div>

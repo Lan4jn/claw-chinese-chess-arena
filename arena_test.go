@@ -918,6 +918,215 @@ func TestArenaPausesOnlyAfterSessionAndMessageBothFail(t *testing.T) {
 	}
 }
 
+func TestArenaAdvanceOnceRetriesCorrectableMessageMove(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+	defer arena.Close()
+
+	messageCalls := 0
+	arena.requestMove = func(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
+		messageCalls++
+		switch messageCalls {
+		case 1:
+			return "a0-a3", "MOVE: a0-a3", nil
+		case 2:
+			if !arenaState.IsCorrection {
+				t.Fatalf("expected second request to be a correction prompt")
+			}
+			if arenaState.RejectedMove != "a0-a3" {
+				t.Fatalf("expected rejected move a0-a3, got %q", arenaState.RejectedMove)
+			}
+			if arenaState.RejectionReason == "" {
+				t.Fatalf("expected rejection reason to be present")
+			}
+			if arenaState.CorrectionAttempt != 1 || arenaState.CorrectionLimit != 3 {
+				t.Fatalf("expected correction attempt 1/3, got %d/%d", arenaState.CorrectionAttempt, arenaState.CorrectionLimit)
+			}
+			return "a3-a4", "MOVE: a3-a4", nil
+		default:
+			t.Fatalf("unexpected extra message call %d", messageCalls)
+			return "", "", nil
+		}
+	}
+
+	hostView, participantID := setupManagedBlackPicoclawRoom(t, arena, "message-correction-room")
+
+	forceRoomReadyForAdvance(t, arena, hostView.Room.Code)
+	if err := arena.AdvanceOnce(); err != nil {
+		t.Fatalf("AdvanceOnce() error = %v", err)
+	}
+
+	if messageCalls != 2 {
+		t.Fatalf("expected 2 message calls, got %d", messageCalls)
+	}
+	matchView, err := arena.PublicMatch(hostView.Room.Code)
+	if err != nil {
+		t.Fatalf("PublicMatch() error = %v", err)
+	}
+	if matchView.LastMove != "a3-a4" {
+		t.Fatalf("expected corrected move a3-a4, got %q", matchView.LastMove)
+	}
+	hostMatch, err := arena.HostMatch(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostMatch() error = %v", err)
+	}
+	if !containsLogMessage(hostMatch.RawLogs, "选手走子被驳回") {
+		t.Fatalf("expected rejection log in raw logs")
+	}
+	if !containsLogMessage(hostMatch.RawLogs, "系统要求选手重新走子") {
+		t.Fatalf("expected retry-requested log in raw logs")
+	}
+	hostRoom, err := arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() error = %v", err)
+	}
+	runtime := hostRoom.Runtime[participantID]
+	if runtime.ActiveMode != PicoclawActiveModeMessage {
+		t.Fatalf("expected active mode to stay message, got %q", runtime.ActiveMode)
+	}
+}
+
+func TestArenaAdvanceOnceRetriesCorrectableSessionMove(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+	defer arena.Close()
+
+	sessionCalls := 0
+	arena.requestSessionMove = func(matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
+		sessionCalls++
+		switch sessionCalls {
+		case 1:
+			return "a0-a3", "MOVE: a0-a3", nil
+		case 2:
+			if !arenaState.IsCorrection {
+				t.Fatalf("expected second session request to be a correction prompt")
+			}
+			return "a3-a4", "MOVE: a3-a4", nil
+		default:
+			t.Fatalf("unexpected extra session call %d", sessionCalls)
+			return "", "", nil
+		}
+	}
+
+	hostView, participantID := setupManagedBlackPicoclawRoom(t, arena, "session-correction-room")
+	if _, err := arena.SetPicoclawMode(hostView.Room.Code, hostView.Participant.ID, participantID, PicoclawModePreferSession); err != nil {
+		t.Fatalf("SetPicoclawMode() error = %v", err)
+	}
+	opened, err := arena.OpenPicoclawSession(hostView.Room.Code, hostView.Participant.ID, participantID)
+	if err != nil {
+		t.Fatalf("OpenPicoclawSession() error = %v", err)
+	}
+	if _, err := arena.HeartbeatPicoclawSession(hostView.Room.Code, participantID, opened.SessionID, opened.SessionAuthToken, 45*time.Second); err != nil {
+		t.Fatalf("HeartbeatPicoclawSession() error = %v", err)
+	}
+
+	forceRoomReadyForAdvance(t, arena, hostView.Room.Code)
+	if err := arena.AdvanceOnce(); err != nil {
+		t.Fatalf("AdvanceOnce() error = %v", err)
+	}
+
+	if sessionCalls != 2 {
+		t.Fatalf("expected 2 session calls, got %d", sessionCalls)
+	}
+	matchView, err := arena.PublicMatch(hostView.Room.Code)
+	if err != nil {
+		t.Fatalf("PublicMatch() error = %v", err)
+	}
+	if matchView.LastMove != "a3-a4" {
+		t.Fatalf("expected corrected move a3-a4, got %q", matchView.LastMove)
+	}
+}
+
+func TestArenaAdvanceOnceRetriesCorrectablePicoWSMove(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+	defer arena.Close()
+
+	wsCalls := 0
+	arena.requestWSMove = func(matchID string, participantID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
+		wsCalls++
+		switch wsCalls {
+		case 1:
+			return "a0-a3", "MOVE: a0-a3", nil
+		case 2:
+			if !arenaState.IsCorrection {
+				t.Fatalf("expected second pico_ws request to be a correction prompt")
+			}
+			return "a3-a4", "MOVE: a3-a4", nil
+		default:
+			t.Fatalf("unexpected extra pico_ws call %d", wsCalls)
+			return "", "", nil
+		}
+	}
+
+	hostView, participantID := setupManagedBlackPicoclawRoom(t, arena, "pico-ws-correction-room")
+	if _, err := arena.SetPicoclawMode(hostView.Room.Code, hostView.Participant.ID, participantID, PicoclawModePreferPicoWS); err != nil {
+		t.Fatalf("SetPicoclawMode() error = %v", err)
+	}
+	hostRoom, err := arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() error = %v", err)
+	}
+	runtime := hostRoom.Runtime[participantID]
+	runtime.WSState = PicoclawWSStateActive
+	runtime.ActiveMode = PicoclawActiveModePicoWS
+	room := arena.rooms[normalizeRoomCode(hostView.Room.Code)]
+	room.PicoclawRuntime[participantID] = runtime
+
+	forceRoomReadyForAdvance(t, arena, hostView.Room.Code)
+	if err := arena.AdvanceOnce(); err != nil {
+		t.Fatalf("AdvanceOnce() error = %v", err)
+	}
+
+	if wsCalls != 2 {
+		t.Fatalf("expected 2 pico_ws calls, got %d", wsCalls)
+	}
+	matchView, err := arena.PublicMatch(hostView.Room.Code)
+	if err != nil {
+		t.Fatalf("PublicMatch() error = %v", err)
+	}
+	if matchView.LastMove != "a3-a4" {
+		t.Fatalf("expected corrected move a3-a4, got %q", matchView.LastMove)
+	}
+}
+
+func TestArenaAdvanceOncePausesAfterThreeCorrectableInvalidMoves(t *testing.T) {
+	store := NewMemorySnapshotStore()
+	arena := NewArena(store)
+	defer arena.Close()
+
+	messageCalls := 0
+	arena.requestMove = func(matchID string, player PlayerConfig, state GameState, legal []string, arenaState PromptArenaState) (string, string, error) {
+		messageCalls++
+		return "a0-a3", "MOVE: a0-a3", nil
+	}
+
+	hostView, _ := setupManagedBlackPicoclawRoom(t, arena, "message-three-strikes-room")
+
+	forceRoomReadyForAdvance(t, arena, hostView.Room.Code)
+	if err := arena.AdvanceOnce(); err != nil {
+		t.Fatalf("AdvanceOnce() error = %v", err)
+	}
+
+	if messageCalls != 3 {
+		t.Fatalf("expected 3 message calls, got %d", messageCalls)
+	}
+	publicRoom, err := arena.PublicRoom(hostView.Room.Code)
+	if err != nil {
+		t.Fatalf("PublicRoom() error = %v", err)
+	}
+	if publicRoom.Status != RoomStatusPaused {
+		t.Fatalf("expected room paused after 3 invalid moves, got %q", publicRoom.Status)
+	}
+	hostMatch, err := arena.HostMatch(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostMatch() error = %v", err)
+	}
+	if !containsLogMessage(hostMatch.RawLogs, "连续3次提交违规着法") {
+		t.Fatalf("expected exhaustion log in raw logs")
+	}
+}
+
 func TestArenaAdvanceOnceFallsBackFromMessageToSession(t *testing.T) {
 	store := NewMemorySnapshotStore()
 	arena := NewArena(store)
@@ -2233,4 +2442,63 @@ func TestMatchApplyAgentMovePreservesRepetitionErrorText(t *testing.T) {
 	if last.Error != "move causes forbidden long-chase repetition" {
 		t.Fatalf("expected repetition error to reach logs, got %#v", last)
 	}
+}
+
+func setupManagedBlackPicoclawRoom(t *testing.T, arena *Arena, roomCode string) (ArenaEnterView, string) {
+	t.Helper()
+
+	hostView, err := arena.Enter(EnterRequest{
+		RoomCode:    roomCode,
+		ClientToken: "host-token",
+		JoinIntent:  JoinIntentPlayer,
+	})
+	if err != nil {
+		t.Fatalf("Enter(host) error = %v", err)
+	}
+	if _, err := arena.Enter(EnterRequest{
+		RoomCode:    roomCode,
+		ClientToken: "guest-token",
+		JoinIntent:  JoinIntentPlayer,
+	}); err != nil {
+		t.Fatalf("Enter(guest) error = %v", err)
+	}
+	if err := arena.BindSeatAgent(hostView.Room.Code, hostView.Participant.ID, SeatBlackPlayer, AgentBinding{
+		RealType:    AgentTypePicoclaw,
+		Name:        "托管黑方",
+		PublicAlias: "黑雨伞",
+		Connection:  "managed",
+		BaseURL:     "http://127.0.0.1:9001",
+	}); err != nil {
+		t.Fatalf("BindSeatAgent() error = %v", err)
+	}
+	if err := arena.UpdateSettings(hostView.Room.Code, hostView.Participant.ID, RoomSettingsRequest{
+		StepIntervalMS: 1,
+	}); err != nil {
+		t.Fatalf("UpdateSettings() error = %v", err)
+	}
+	if _, err := arena.StartMatch(hostView.Room.Code, hostView.Participant.ID); err != nil {
+		t.Fatalf("StartMatch() error = %v", err)
+	}
+	if _, err := arena.SubmitMove(hostView.Room.Code, hostView.Participant.ID, "a6-a5"); err != nil {
+		t.Fatalf("SubmitMove() error = %v", err)
+	}
+
+	hostRoom, err := arena.HostRoom(hostView.Room.Code, hostView.Participant.ID)
+	if err != nil {
+		t.Fatalf("HostRoom() error = %v", err)
+	}
+	participantID := hostRoom.Room.Seats[SeatBlackPlayer].ParticipantID
+	if participantID == "" {
+		t.Fatalf("expected managed participant on black seat")
+	}
+	return hostView, participantID
+}
+
+func containsLogMessage(logs []MatchLogView, want string) bool {
+	for _, item := range logs {
+		if strings.Contains(item.Message, want) {
+			return true
+		}
+	}
+	return false
 }

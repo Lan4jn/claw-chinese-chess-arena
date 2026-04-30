@@ -45,9 +45,14 @@ type PicoclawInviteRequest struct {
 }
 
 type PromptArenaState struct {
-	RoomCode       string
-	StepIntervalMS int
-	OpponentAlias  string
+	RoomCode          string
+	StepIntervalMS    int
+	OpponentAlias     string
+	IsCorrection      bool
+	RejectedMove      string
+	RejectionReason   string
+	CorrectionAttempt int
+	CorrectionLimit   int
 }
 
 var movePattern = regexp.MustCompile(`[a-i][0-9]-[a-i][0-9]`)
@@ -217,6 +222,15 @@ func buildMovePrompt(matchID string, player PlayerConfig, state GameState, legal
 	if state.Side == SideBlack {
 		sideName = "黑方"
 	}
+	correctionBlock := ""
+	if arenaState.IsCorrection {
+		correctionBlock = fmt.Sprintf(`
+
+裁判反馈：你刚才提交的 %s 不允许执行。
+驳回原因：%s。
+这是当前回合第 %d/%d 次改走机会。
+请不要重复上一手，重新从合法走法中选择一步。`, strings.TrimSpace(arenaState.RejectedMove), strings.TrimSpace(arenaState.RejectionReason), arenaState.CorrectionAttempt, arenaState.CorrectionLimit)
+	}
 	return fmt.Sprintf(`你正在参加一场中国象棋对局，比赛 ID：%s。
 比赛场地：%s。
 你是：%s（%s）。
@@ -230,11 +244,11 @@ func buildMovePrompt(matchID string, player PlayerConfig, state GameState, legal
 当前棋盘：
 %s
 轮到你走。只能从下面合法走法中选择一个：
-%s
+%s%s
 
 请只给出一步棋，格式必须包含 MOVE: a0-a1，例如：
 MOVE: h9-g7
-不要执行命令，不要解释长篇推理。`, matchID, arenaState.RoomCode, player.Name, sideName, arenaState.StepIntervalMS, arenaState.OpponentAlias, BoardText(state.Board), strings.Join(legal, ", "))
+不要执行命令，不要解释长篇推理。`, matchID, arenaState.RoomCode, player.Name, sideName, arenaState.StepIntervalMS, arenaState.OpponentAlias, BoardText(state.Board), strings.Join(legal, ", "), correctionBlock)
 }
 
 func buildInvitePrompt(invite PicoclawInviteRequest) string {
